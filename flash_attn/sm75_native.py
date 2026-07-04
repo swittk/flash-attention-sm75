@@ -328,6 +328,12 @@ def _to_fp16_for_sm75(x: torch.Tensor) -> torch.Tensor:
     return x.contiguous() if not x.is_contiguous() else x
 
 
+def _restore_sm75_output_dtype(out: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    if reference.dtype == torch.bfloat16:
+        return out.to(torch.bfloat16)
+    return out
+
+
 def _apply_rotary_sm75(
     x: torch.Tensor,
     rotary_cos: torch.Tensor,
@@ -426,6 +432,7 @@ def try_forward(
             bool(return_softmax),
         )
         backend_kind = f"generic_fwd_hd{q.shape[-1]}"
+    out = _restore_sm75_output_dtype(out, q)
     if not return_softmax:
         s_dmask = torch.empty((0,), dtype=out.dtype, device=out.device)
     rng_state = torch.empty((2,), dtype=torch.int64, device=out.device)
@@ -744,6 +751,7 @@ def try_varlen_forward(
             if return_softmax:
                 s_dmask[batch_idx, :, :q_len, :k_len].copy_(probs_i.squeeze(0))
         backend_kind = f"varlen_generic_fwd_hd{q.shape[-1]}"
+    out = _restore_sm75_output_dtype(out, q)
     rng_state = torch.empty((2,), dtype=torch.int64, device=out.device)
     _set_last_backend(
         "sm75_native_"
@@ -1265,6 +1273,7 @@ def try_kvcache_forward(
             out = out_packed.reshape_as(q)
             path = "varlen"
 
+    out = _restore_sm75_output_dtype(out, q)
     _set_last_backend(
         "sm75_native_kvcache_fwd"
         f"_{path}"

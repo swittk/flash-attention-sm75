@@ -151,13 +151,22 @@ This fork keeps the package name `flash-attn` and import package `flash_attn`, w
 
 Install from this repository:
 ```sh
-pip install -e . --no-build-isolation
+pip install --no-deps -e . --no-build-isolation
 ```
 
 For a faster development build that compiles only the SM75 extension:
 ```sh
-FLASH_ATTN_FORCE_BUILD=TRUE FLASH_ATTN_BUILD_SM75_ONLY=TRUE pip install -e . --no-build-isolation
+FLASH_ATTN_FORCE_BUILD=TRUE FLASH_ATTN_BUILD_SM75_ONLY=TRUE pip install --no-deps -e . --no-build-isolation
 ```
+
+Wheel build/install for this fork must preserve the PyTorch CUDA ABI already installed in the target environment:
+```sh
+python3 -m pip install einops
+FLASH_ATTN_FORCE_BUILD=TRUE FLASH_ATTN_BUILD_SM75_ONLY=TRUE python3 -m pip wheel . --no-build-isolation --no-deps -w dist-sm75
+python3 -m pip install --force-reinstall --no-deps dist-sm75/flash_attn*.whl
+```
+
+Do not install this fork with dependency resolution unless you intentionally want pip to manage PyTorch. The extension is compiled against the active `torch` headers/libraries, and replacing torch after wheel build can create undefined-symbol ABI failures. If you use `--no-deps`, install runtime dependencies such as `einops` yourself; `flash_attn.bert_padding` imports it.
 
 Native-only test mode disables runtime fallbacks and requires every served call to report an `sm75_native...` backend:
 ```sh
@@ -178,10 +187,7 @@ make sm75-ci
 make sm75-sanitize
 ```
 
-Latest RTX 2080 Ti gate run in this workspace:
-- `make sm75-ci`: 60 SM75 tests passed, prefill geomean 1.249x vs PyTorch SDPA, decode 1.460x vs SDPA.
-- `make sm75-sanitize`: 21 dense correctness tests passed under compute-sanitizer with `ERROR SUMMARY: 0 errors`.
-- `FLASH_ATTN_FORCE_BUILD=TRUE python3 -m pip wheel . --no-build-isolation -w /tmp/sm75-wheelhouse`: succeeded; the final source state was refreshed with `--no-deps` in `/tmp/sm75-wheelhouse-final/flash_attn-2.8.4-cp310-cp310-linux_x86_64.whl`.
+Latest RTX 2080 Ti audit evidence in this workspace is in the outer `evidence-sm75/` directory, not in this source tree. The broad audit includes 84 native-only tests, an 88-case expanded correctness run, a 50-test compute-sanitizer subset with zero errors, clean wheel install logs, Transformers FA2 generation logs, broad raw benchmark JSON, and a blocker report for slow generic/paged paths. Do not use the older narrow 60-test or 4-row benchmark results as performance proof.
 
 ### AMD ROCm Support
 ROCm version has two backends. There is [composable_kernel](https://github.com/ROCm/composable_kernel) (ck) which is the default backend and a [Triton](https://github.com/triton-lang/triton) backend. They provide an implementation of FlashAttention-2.

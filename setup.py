@@ -756,8 +756,11 @@ if ROCM_BACKEND == "triton":
         "triton>=3.6.0" if sys.platform != "win32" else "triton-windows>=3.6.0",
     ]
 else:
+    # Do not declare torch as an install dependency. Binary extensions are built
+    # against the torch/CUDA ABI already present in the environment; allowing pip
+    # to resolve torch can replace a compatible local CUDA build with an
+    # incompatible wheel and break the freshly built extension.
     install_requires = [
-        "torch",
         "einops",
     ]
 
