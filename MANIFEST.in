@@ -4,6 +4,7 @@ recursive-include csrc *.cuh
 recursive-include csrc *.cpp
 recursive-include csrc *.hpp
 recursive-include csrc *.py
+recursive-include csrc *.md
 
 recursive-include flash_attn *.cu
 recursive-include flash_attn *.h

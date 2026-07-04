@@ -7,9 +7,12 @@ import torch.nn as nn
 import os
 import warnings
 
+from . import sm75_native as _sm75_native
+
 # isort: off
 # We need to import the CUDA kernels after importing torch
 USE_TRITON_ROCM = os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE"
+_FLASH_ATTN_2_IMPORT_ERROR = None
 if not USE_TRITON_ROCM and getattr(torch.version, 'hip', None) is not None:
     try:
         import flash_attn_2_cuda
@@ -20,9 +23,31 @@ if not USE_TRITON_ROCM and getattr(torch.version, 'hip', None) is not None:
 if USE_TRITON_ROCM:
     from aiter.ops.triton._triton_kernels.flash_attn_triton_amd import flash_attn_2 as flash_attn_gpu
 else:
-    import flash_attn_2_cuda as flash_attn_gpu
+    try:
+        import flash_attn_2_cuda as flash_attn_gpu
+    except ImportError as exc:
+        if not _sm75_native.is_available():
+            raise
+        flash_attn_gpu = None
+        _FLASH_ATTN_2_IMPORT_ERROR = exc
 
 # isort: on
+
+
+def get_last_flash_attn_backend():
+    return _sm75_native.get_last_backend()
+
+
+def reset_last_flash_attn_backend():
+    _sm75_native.reset_last_backend()
+
+
+def _require_flash_attn_2_cuda():
+    if flash_attn_gpu is None:
+        raise ImportError(
+            "flash_attn_2_cuda is unavailable and the SM75 native backend cannot serve this call"
+        ) from _FLASH_ATTN_2_IMPORT_ERROR
+    return flash_attn_gpu
 
 def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
@@ -96,7 +121,22 @@ def _flash_attn_forward(
     return_softmax: bool
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.fwd(
+    sm75_result = _sm75_native.try_forward(
+        q,
+        k,
+        v,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size_left,
+        window_size_right,
+        softcap,
+        alibi_slopes,
+        return_softmax,
+    )
+    if sm75_result is not None:
+        return sm75_result
+    out, softmax_lse, S_dmask, rng_state = _require_flash_attn_2_cuda().fwd(
         q,
         k,
         v,
@@ -174,7 +214,30 @@ def _flash_attn_varlen_forward(
     num_splits: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
-    out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.varlen_fwd(
+    sm75_result = _sm75_native.try_varlen_forward(
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size_left,
+        window_size_right,
+        softcap,
+        alibi_slopes,
+        return_softmax,
+        block_table,
+        leftpad_k,
+        seqused_k,
+        num_splits,
+    )
+    if sm75_result is not None:
+        return sm75_result
+    out, softmax_lse, S_dmask, rng_state = _require_flash_attn_2_cuda().varlen_fwd(
         q,
         k,
         v,
@@ -272,12 +335,32 @@ def _flash_attn_backward(
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
+    sm75_result = _sm75_native.try_backward(
+        dout,
+        q,
+        k,
+        v,
+        out,
+        softmax_lse,
+        dq,
+        dk,
+        dv,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size_left,
+        window_size_right,
+        softcap,
+        alibi_slopes,
+    )
+    if sm75_result is not None:
+        return sm75_result
     (
         dq,
         dk,
         dv,
         softmax_d,
-    ) = flash_attn_gpu.bwd(
+    ) = _require_flash_attn_2_cuda().bwd(
         dout,
         q,
         k,
@@ -372,12 +455,37 @@ def _flash_attn_varlen_backward(
 ) -> torch.Tensor:
     # dq, dk, dv are allocated by us so they should already be contiguous
     dout, q, k, v, out = [maybe_contiguous(x) for x in (dout, q, k, v, out)]
+    sm75_result = _sm75_native.try_varlen_backward(
+        dout,
+        q,
+        k,
+        v,
+        out,
+        softmax_lse,
+        dq,
+        dk,
+        dv,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size_left,
+        window_size_right,
+        softcap,
+        alibi_slopes,
+        zero_tensors,
+    )
+    if sm75_result is not None:
+        return sm75_result
     (
         dq,
         dk,
         dv,
         softmax_d,
-    ) = flash_attn_gpu.varlen_bwd(
+    ) = _require_flash_attn_2_cuda().varlen_bwd(
         dout,
         q,
         k,
@@ -1214,6 +1322,25 @@ def flash_attn_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
+    if not any(x.requires_grad for x in (q, k, v)):
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** (-0.5)
+        sm75_result = _sm75_native.try_forward(
+            maybe_contiguous(q),
+            maybe_contiguous(k),
+            maybe_contiguous(v),
+            dropout_p,
+            softmax_scale,
+            causal,
+            window_size[0],
+            window_size[1],
+            softcap,
+            alibi_slopes,
+            return_attn_probs,
+        )
+        if sm75_result is not None:
+            out_padded, softmax_lse, S_dmask, _ = sm75_result
+            return out_padded if not return_attn_probs else (out_padded, softmax_lse, S_dmask)
     return FlashAttnFunc.apply(
         q,
         k,
@@ -1599,10 +1726,34 @@ def flash_attn_with_kvcache(
         cache_seqlens = torch.full(
             (q.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
         )
-        cache_seqlens = maybe_contiguous(cache_seqlens)
+    cache_seqlens = maybe_contiguous(cache_seqlens)
     cache_batch_idx = maybe_contiguous(cache_batch_idx)
     block_table = maybe_contiguous(block_table)
-    out, softmax_lse = flash_attn_gpu.fwd_kvcache(
+    sm75_result = _sm75_native.try_kvcache_forward(
+        q,
+        k_cache,
+        v_cache,
+        k,
+        v,
+        cache_seqlens,
+        cache_batch_idx,
+        cache_leftpad,
+        block_table,
+        rotary_cos,
+        rotary_sin,
+        softmax_scale,
+        causal,
+        window_size[0],
+        window_size[1],
+        softcap,
+        rotary_interleaved,
+        alibi_slopes,
+        num_splits,
+    )
+    if sm75_result is not None:
+        out, softmax_lse = sm75_result
+        return (out, softmax_lse) if return_softmax_lse else out
+    out, softmax_lse = _require_flash_attn_2_cuda().fwd_kvcache(
         q,
         k_cache,
         v_cache,

@@ -68,6 +68,8 @@ ROCM_BACKEND: Optional[Literal["triton", "ck"]] = None
 if IS_ROCM:
     ROCM_BACKEND = "triton" if os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE" else "ck"
 NVCC_THREADS = os.getenv("NVCC_THREADS") or "4"
+BUILD_SM75_NATIVE = os.getenv("FLASH_ATTN_DISABLE_SM75_NATIVE", "FALSE") != "TRUE"
+BUILD_SM75_ONLY = os.getenv("FLASH_ATTN_BUILD_SM75_ONLY", "FALSE") == "TRUE"
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
@@ -107,13 +109,17 @@ def add_cuda_gencodes(cc_flag, archs, bare_metal_version):
       - Map requested 110 -> 101 if CUDA < 13.0 (Thor rename)
       - Embed PTX for newest arch for forward compatibility
     """
+    supported_ptx_archs = []
+
     # Always-regular 80
     if "80" in archs:
         cc_flag += ["-gencode", "arch=compute_80,code=sm_80"]
+        supported_ptx_archs.append("80")
 
     # Hopper 9.0 needs >= 11.8
     if bare_metal_version >= Version("11.8") and "90" in archs:
         cc_flag += ["-gencode", "arch=compute_90,code=sm_90"]
+        supported_ptx_archs.append("90")
 
     # Blackwell 10.x requires >= 12.8
     if bare_metal_version >= Version("12.8"):
@@ -121,31 +127,36 @@ def add_cuda_gencodes(cc_flag, archs, bare_metal_version):
             # CUDA 12.9 introduced "family-specific" for Blackwell (100f)
             if bare_metal_version >= Version("12.9"):
                 cc_flag += ["-gencode", "arch=compute_100f,code=sm_100"]
+                supported_ptx_archs.append("100f")
             else:
                 cc_flag += ["-gencode", "arch=compute_100,code=sm_100"]
+                supported_ptx_archs.append("100")
 
         if "120" in archs:
             # sm_120 is supported in CUDA 12.8/12.9+ toolkits
             if bare_metal_version >= Version("12.9"):
                 cc_flag += ["-gencode", "arch=compute_120f,code=sm_120"]
+                supported_ptx_archs.append("120f")
             else:
                 cc_flag += ["-gencode", "arch=compute_120,code=sm_120"]
+                supported_ptx_archs.append("120")
 
 
         # Thor rename: 12.9 uses sm_101; 13.0+ uses sm_110
         if "110" in archs:
             if bare_metal_version >= Version("13.0"):
                 cc_flag += ["-gencode", "arch=compute_110f,code=sm_110"]
+                supported_ptx_archs.append("110f")
             else:
                 # Provide Thor support for CUDA 12.9 via sm_101
                 if bare_metal_version >= Version("12.8"):
                     cc_flag += ["-gencode", "arch=compute_101,code=sm_101"]
+                    supported_ptx_archs.append("101")
                 # else: no Thor support in older toolkits
 
-    # PTX for newest requested arch (forward-compat)
-    numeric = [a for a in archs if a.isdigit()]
-    if numeric:
-        newest = max(numeric, key=int)
+    # PTX for newest requested arch that this nvcc actually supports.
+    if supported_ptx_archs:
+        newest = max(supported_ptx_archs, key=lambda arch: int(arch.rstrip("f")))
         cc_flag += ["-gencode", f"arch=compute_{newest},code=compute_{newest}"]
 
     return cc_flag
@@ -414,6 +425,46 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
             ],
         )
     )
+    if BUILD_SM75_ONLY:
+        ext_modules.clear()
+    if BUILD_SM75_NATIVE:
+        sm75_nvcc_flags = [
+            "-O3",
+            "-std=c++17",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
+            "--use_fast_math",
+            "-gencode",
+            "arch=compute_75,code=sm_75",
+        ]
+        ext_modules.append(
+            CUDAExtension(
+                name="flash_attn_sm75_cuda",
+                sources=[
+                    "csrc/flash_attn_sm75/flash_api.cpp",
+                    "csrc/flash_attn_sm75/src/flash_fwd_hdim64_fp16_sm75.cu",
+                    "csrc/flash_attn_sm75/src/flash_fwd_hdim64_fp16_causal_sm75.cu",
+                    "csrc/flash_attn_sm75/src/flash_fwd_hdim128_fp16_sm75.cu",
+                    "csrc/flash_attn_sm75/src/flash_fwd_hdim128_fp16_causal_sm75.cu",
+                    "csrc/flash_attn_sm75/src/flash_fwd_generic_sm75.cu",
+                    "csrc/flash_attn_sm75/src/flash_bwd_hdim64_fp16_sm75.cu",
+                    "csrc/flash_attn_sm75/src/flash_bwd_hdim64_fp16_causal_sm75.cu",
+                    "csrc/flash_attn_sm75/src/flash_bwd_hdim128_fp16_sm75.cu",
+                    "csrc/flash_attn_sm75/src/flash_bwd_hdim128_fp16_causal_sm75.cu",
+                    "csrc/flash_attn_sm75/src/flash_bwd_generic_sm75.cu",
+                ],
+                extra_compile_args={
+                    "cxx": compiler_c17_flag,
+                    "nvcc": append_nvcc_threads(sm75_nvcc_flags),
+                },
+                include_dirs=[
+                    Path(this_dir) / "csrc" / "flash_attn_sm75",
+                    Path(this_dir) / "csrc" / "flash_attn_sm75" / "src",
+                    Path(this_dir) / "csrc" / "cutlass" / "include",
+                    Path(this_dir) / "csrc" / "cutlass" / "tools" / "util" / "include",
+                ],
+            )
+        )
 elif not SKIP_CUDA_BUILD and IS_ROCM:
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
     TORCH_MAJOR = int(torch.__version__.split(".")[0])

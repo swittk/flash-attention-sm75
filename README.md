@@ -142,9 +142,46 @@ We recommend the
 container from Nvidia, which has all the required tools to install FlashAttention.
 
 FlashAttention-2 with CUDA currently supports:
-1. Ampere, Ada, or Hopper GPUs (e.g., A100, RTX 3090, RTX 4090, H100). For Turing GPUs (T4, RTX 2080), see the separate [flash-attention-turing](https://github.com/ssiu/flash-attention-turing) repo, which supports a core subset of FlashAttention features on Turing.
-2. Datatype fp16 and bf16 (bf16 requires Ampere, Ada, or Hopper GPUs).
+1. Ampere, Ada, or Hopper GPUs (e.g., A100, RTX 3090, RTX 4090, H100). This fork also includes an in-tree native SM75/Turing backend for RTX 2080 Ti / T4 class GPUs.
+2. Datatype fp16 and bf16. Upstream native BF16 CUDA compute targets Ampere, Ada, or Hopper; this fork handles BF16 user inputs on SM75 through an explicit FP16 compute policy.
 3. All head dimensions up to 256. ~~Head dim > 192 backward requires A100/A800 or H100/H800~~. Head dim 256 backward now works on consumer GPUs (if there's no dropout) as of flash-attn 2.5.5.
+
+### Native SM75 / Turing backend in this fork
+This fork keeps the package name `flash-attn` and import package `flash_attn`, while adding a self-contained CUDA SM75 extension named `flash_attn_sm75_cuda`. It is intended for NVIDIA Turing GPUs such as RTX 2080 Ti on CUDA 12.x.
+
+Install from this repository:
+```sh
+pip install -e . --no-build-isolation
+```
+
+For a faster development build that compiles only the SM75 extension:
+```sh
+FLASH_ATTN_FORCE_BUILD=TRUE FLASH_ATTN_BUILD_SM75_ONLY=TRUE pip install -e . --no-build-isolation
+```
+
+Native-only test mode disables runtime fallbacks and requires every served call to report an `sm75_native...` backend:
+```sh
+FLASH_ATTN_SM75_NATIVE_ONLY=1 FLASH_ATTN_SM75_BAN_FALLBACKS=1 pytest -q tests/test_sm75_*.py
+```
+
+Implemented SM75-native paths in this fork:
+- Specialized FP16 CuTe/CUTLASS SM75 kernels for dense and varlen forward/backward at head dimensions 64 and 128, causal and non-causal, MHA/GQA/MQA.
+- Generic FP16 CUDA forward/backward kernels for dense head dimensions 32, 64, 80, 96, 112, 128, 160, 192, 224, and 256, including local/sliding-window masks, dropout, softcap, ALiBI, and explicit `return_attn_probs`.
+- Public API dispatch for `flash_attn_func`, packed QKV/KV APIs, varlen APIs, and `flash_attn_with_kvcache`.
+- Generic varlen dispatch for the same head-dim set via per-sequence native SM75 CUDA launches, including local/sliding-window masks, dropout, softcap, ALiBI, `return_attn_probs`, zero-length query sequences, `leftpad_k`, `seqused_k`, and paged `block_table` forward packing.
+- KV-cache paths for q_len=1 decode, q_len>1 chunked decode, in-place cache update, `cache_seqlens`, `cache_batch_idx`, `cache_leftpad`, rotary embeddings, contiguous cache, and block-table paged cache packing.
+- BF16 inputs on SM75 are explicitly converted to FP16 for native compute; no CUDA BF16 tensor-core kernels are used for SM75.
+
+Validation targets:
+```sh
+make sm75-ci
+make sm75-sanitize
+```
+
+Latest RTX 2080 Ti gate run in this workspace:
+- `make sm75-ci`: 60 SM75 tests passed, prefill geomean 1.249x vs PyTorch SDPA, decode 1.460x vs SDPA.
+- `make sm75-sanitize`: 21 dense correctness tests passed under compute-sanitizer with `ERROR SUMMARY: 0 errors`.
+- `FLASH_ATTN_FORCE_BUILD=TRUE python3 -m pip wheel . --no-build-isolation -w /tmp/sm75-wheelhouse`: succeeded; the final source state was refreshed with `--no-deps` in `/tmp/sm75-wheelhouse-final/flash_attn-2.8.4-cp310-cp310-linux_x86_64.whl`.
 
 ### AMD ROCm Support
 ROCm version has two backends. There is [composable_kernel](https://github.com/ROCm/composable_kernel) (ck) which is the default backend and a [Triton](https://github.com/triton-lang/triton) backend. They provide an implementation of FlashAttention-2.

@@ -1,0 +1,41 @@
+dense:
+  - name: llama_prefill_1k_hd64
+    batch: 1
+    seqlen_q: 1024
+    seqlen_k: 1024
+    nheads: 16
+    nheads_k: 16
+    headdim: 64
+    causal: true
+  - name: gqa_prefill_2k_hd128
+    batch: 1
+    seqlen_q: 2048
+    seqlen_k: 2048
+    nheads: 16
+    nheads_k: 4
+    headdim: 128
+    causal: true
+  - name: cross_attention_hd64
+    batch: 2
+    seqlen_q: 512
+    seqlen_k: 1024
+    nheads: 8
+    nheads_k: 8
+    headdim: 64
+    causal: false
+
+kvcache_decode:
+  - name: decode_q1_cache4k_hd64
+    batch: 1
+    q_len: 1
+    cache_len: 4096
+    nheads: 16
+    nheads_k: 4
+    headdim: 64
+  - name: chunked_decode_q8_cache4k_hd128
+    batch: 1
+    q_len: 8
+    cache_len: 4096
+    nheads: 16
+    nheads_k: 4
+    headdim: 128
