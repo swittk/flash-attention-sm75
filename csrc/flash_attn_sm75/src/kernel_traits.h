@@ -54,12 +54,13 @@ struct Flash_fwd_kernel_traits : public Base {
     static constexpr int kBlockM = kBlockM_;
     static constexpr int kBlockN = kBlockN_;
     static constexpr int kHeadDim = kHeadDim_;
+    static constexpr int kNWarps = kNWarps_;
 
     using TiledMma = TiledMMA<
         typename Base::MMA_Atom_Arch,
-        Layout<Shape<_8,_1,_1>>,
+        Layout<Shape<Int<kNWarps>,_1,_1>>,
         // LDSM loads 32 rows for K and V
-        Tile<_128, _32, _8>>;
+        Tile<Int<kBlockM>, _32, _8>>;
 
     using SmemLayoutAtomQK = decltype(
         composition(Swizzle<3, 3, 3>{},

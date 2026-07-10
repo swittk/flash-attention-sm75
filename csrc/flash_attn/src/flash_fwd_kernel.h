@@ -581,7 +581,15 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
     // We move K and V to the last block.
     const int bidb_cache = params.cache_batch_idx == nullptr ? bidb : params.cache_batch_idx[bidb];
-    const int *block_table = params.block_table == nullptr ? nullptr : params.block_table + bidb * params.block_table_batch_stride;
+    const int block_table_bidb =
+#if defined(FLASHATTN_ENABLE_SM75)
+        bidb_cache;
+#else
+        bidb;
+#endif
+    const int *block_table = params.block_table == nullptr
+        ? nullptr
+        : params.block_table + block_table_bidb * params.block_table_batch_stride;
     const int block_table_idx = block_table == nullptr ? 0 : (n_block_max - 1) * kBlockN / params.page_block_size;
     const int block_table_offset = block_table == nullptr ? 0 : (n_block_max - 1) * kBlockN - block_table_idx * params.page_block_size;
     const index_t row_offset_k = block_table == nullptr

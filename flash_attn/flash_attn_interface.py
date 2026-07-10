@@ -1169,6 +1169,40 @@ def flash_attn_qkvpacked_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
+    if not qkv.requires_grad:
+        if softmax_scale is None:
+            softmax_scale = qkv.shape[-1] ** (-0.5)
+        sm75_fast_out = _sm75_native.try_qkvpacked_forward_fast(
+            qkv,
+            dropout_p,
+            softmax_scale,
+            causal,
+            window_size[0],
+            window_size[1],
+            softcap,
+            alibi_slopes,
+            return_attn_probs,
+        )
+        if sm75_fast_out is not None:
+            return sm75_fast_out
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        sm75_result = _sm75_native.try_packed_forward(
+            "qkvpacked",
+            maybe_contiguous(q),
+            maybe_contiguous(k),
+            maybe_contiguous(v),
+            dropout_p,
+            softmax_scale,
+            causal,
+            window_size[0],
+            window_size[1],
+            softcap,
+            alibi_slopes,
+            return_attn_probs and dropout_p > 0,
+        )
+        if sm75_result is not None:
+            out_padded, softmax_lse, S_dmask, _ = sm75_result
+            return out_padded if not return_attn_probs else (out_padded, softmax_lse, S_dmask)
     return FlashAttnQKVPackedFunc.apply(
         qkv,
         dropout_p,
@@ -1246,6 +1280,27 @@ def flash_attn_kvpacked_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
+    if not any(x.requires_grad for x in (q, kv)):
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** (-0.5)
+        k, v = kv[:, :, 0], kv[:, :, 1]
+        sm75_result = _sm75_native.try_packed_forward(
+            "kvpacked",
+            maybe_contiguous(q),
+            maybe_contiguous(k),
+            maybe_contiguous(v),
+            dropout_p,
+            softmax_scale,
+            causal,
+            window_size[0],
+            window_size[1],
+            softcap,
+            alibi_slopes,
+            return_attn_probs and dropout_p > 0,
+        )
+        if sm75_result is not None:
+            out_padded, softmax_lse, S_dmask, _ = sm75_result
+            return out_padded if not return_attn_probs else (out_padded, softmax_lse, S_dmask)
     return FlashAttnKVPackedFunc.apply(
         q,
         kv,

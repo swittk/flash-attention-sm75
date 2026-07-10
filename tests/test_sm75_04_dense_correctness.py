@@ -41,6 +41,36 @@ def test_required_head_dims_are_native(monkeypatch, headdim):
     assert_sm75_backend()
 
 
+def test_dense_d256_uses_fa2_tiled_kernel(monkeypatch):
+    enable_native_only(monkeypatch)
+    q, k, v = make_qkv(
+        batch=1,
+        seqlen_q=64,
+        seqlen_k=128,
+        nheads=8,
+        nheads_k=2,
+        headdim=256,
+    )
+    out = flash_attn_func(q, k, v, causal=False)
+    close_to_ref(out, attention_ref(q, k, v, causal=False))
+    assert_sm75_backend("sm75_native_dense_hd256_fa2_tiled_kernel256")
+
+
+def test_dense_d224_uses_uneven_fa2_tiled_kernel(monkeypatch):
+    enable_native_only(monkeypatch)
+    q, k, v = make_qkv(
+        batch=1,
+        seqlen_q=32,
+        seqlen_k=64,
+        nheads=4,
+        nheads_k=2,
+        headdim=224,
+    )
+    out = flash_attn_func(q, k, v, causal=True)
+    close_to_ref(out, attention_ref(q, k, v, causal=True))
+    assert_sm75_backend("sm75_native_dense_hd224_fa2_tiled_kernel256")
+
+
 @pytest.mark.parametrize("use_batch_alibi", [False, True])
 def test_dense_softcap_alibi_native(monkeypatch, use_batch_alibi):
     enable_native_only(monkeypatch)

@@ -40,6 +40,24 @@ def test_varlen_qkvpacked_forward_correctness(monkeypatch):
     assert_sm75_backend()
 
 
+def test_varlen_qkvpacked_d80_vector_tail_correctness(monkeypatch):
+    enable_native_only(monkeypatch)
+    q, _k, _v, cu_q, _cu_k, max_q, _max_k = make_varlen(
+        batch=3,
+        max_q=33,
+        max_k=33,
+        nheads=4,
+        nheads_k=4,
+        headdim=80,
+    )
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    qkv = torch.stack([q, k, v], dim=1)
+    out = flash_attn_varlen_qkvpacked_func(qkv, cu_q, max_q, causal=True)
+    close_to_ref(out, varlen_ref(q, k, v, cu_q, cu_q, causal=True))
+    assert_sm75_backend("sm75_native_varlen_dense_hd80_fa2_tiled_kernel96")
+
+
 def test_varlen_generic_head_dim_features_native(monkeypatch):
     enable_native_only(monkeypatch)
     q, k, v, cu_q, cu_k, max_q, max_k = make_varlen(batch=2, max_q=9, max_k=11, nheads=4, nheads_k=2, headdim=160)
@@ -161,7 +179,7 @@ def test_varlen_zero_length_query_backward_native(monkeypatch):
     assert get_last_flash_attn_backend().startswith("sm75_native_varlen_generic_bwd")
 
 
-def test_varlen_qkvpacked_generic_head_dim_native(monkeypatch):
+def test_varlen_qkvpacked_wide_tiled_head_dim_native(monkeypatch):
     enable_native_only(monkeypatch)
     q, _k, _v, cu_q, _cu_k, max_q, _max_k = make_varlen(
         batch=2, max_q=8, max_k=8, nheads=2, nheads_k=2, headdim=160
@@ -171,7 +189,22 @@ def test_varlen_qkvpacked_generic_head_dim_native(monkeypatch):
     qkv = torch.stack([q, k, v], dim=1)
     out = flash_attn_varlen_qkvpacked_func(qkv, cu_q, max_q, causal=True)
     close_to_ref(out, varlen_ref(q, k, v, cu_q, cu_q, causal=True), atol=7e-2, rtol=7e-2)
-    assert get_last_flash_attn_backend().startswith("sm75_native_varlen_generic_fwd")
+    assert get_last_flash_attn_backend().startswith("sm75_native_varlen_dense_hd160_tiled_kernel192")
+
+
+def test_varlen_qkvpacked_d224_uses_uneven_fa2_tiled_route(monkeypatch):
+    enable_native_only(monkeypatch)
+    q, _k, _v, cu_q, _cu_k, max_q, _max_k = make_varlen(
+        batch=2, max_q=8, max_k=8, nheads=2, nheads_k=2, headdim=224
+    )
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    qkv = torch.stack([q, k, v], dim=1)
+    out = flash_attn_varlen_qkvpacked_func(qkv, cu_q, max_q, causal=True)
+    close_to_ref(out, varlen_ref(q, k, v, cu_q, cu_q, causal=True), atol=7e-2, rtol=7e-2)
+    assert get_last_flash_attn_backend().startswith(
+        "sm75_native_varlen_dense_hd224_fa2_tiled_kernel256"
+    )
 
 
 def test_varlen_leftpad_seqused_forward_native(monkeypatch):

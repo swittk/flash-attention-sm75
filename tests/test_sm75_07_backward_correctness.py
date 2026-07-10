@@ -6,7 +6,7 @@ from flash_attn import flash_attn_func
 from sm75_test_utils import assert_sm75_backend, attention_ref, close_to_ref, enable_native_only, make_qkv
 
 
-@pytest.mark.parametrize("headdim", [64, 96, 160])
+@pytest.mark.parametrize("headdim", [64, 96, 160, 256])
 @pytest.mark.parametrize("causal", [False, True])
 def test_dense_backward_correctness(monkeypatch, causal, headdim):
     enable_native_only(monkeypatch)

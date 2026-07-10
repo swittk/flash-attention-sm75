@@ -1,10 +1,16 @@
 import argparse
 import json
 import math
+import os
+import sys
 import time
 
 import torch
 import torch.nn.functional as F
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from flash_attn import flash_attn_with_kvcache, get_last_flash_attn_backend
 
@@ -24,7 +30,11 @@ DECODE_AXES = {
 def _classify_backend(backend):
     if not backend:
         return "unknown"
-    if "generic" in backend or "varlen" in backend or "paged" in backend:
+    if "paged_direct" in backend:
+        return "direct native CUDA paged KV-cache kernel"
+    if "paged_gather_dense" in backend:
+        return "Python page gather plus specialized SM75 tiled kernel"
+    if "generic" in backend or "varlen" in backend or "paged_repack" in backend:
         return "generic native CUDA"
     return "specialized SM75 tiled/online-softmax kernel"
 
@@ -272,7 +282,7 @@ def main():
     parser.add_argument("--q-len", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
-    parser.add_argument("--matrix", choices=("default", "broad", "exhaustive"), default="default")
+    parser.add_argument("--matrix", choices=("default", "broad", "final-broad", "exhaustive"), default="default")
     parser.add_argument("--max-rows", type=int, default=0)
     parser.add_argument("--output", "--out", dest="output", default=f"sm75_kvcache_decode_{int(time.time())}.json")
     args = parser.parse_args()
@@ -280,7 +290,7 @@ def main():
         raise SystemExit("SM75 CUDA device is required")
     if args.matrix == "default":
         cases = _default_cases(args.cache_len, args.q_len)
-    elif args.matrix == "broad":
+    elif args.matrix in ("broad", "final-broad"):
         cases = _broad_cases()
     else:
         cases = _exhaustive_cases()

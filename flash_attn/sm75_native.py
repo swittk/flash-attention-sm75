@@ -85,6 +85,20 @@ def _head_group_suffix(q: torch.Tensor, k: torch.Tensor) -> str:
 def _kernel_head_dim(head_dim: int) -> Optional[int]:
     if head_dim <= 64:
         return 64
+    if head_dim <= 96:
+        return 96
+    if head_dim <= 128:
+        return 128
+    if head_dim <= 192:
+        return 192
+    if head_dim <= 256:
+        return 256
+    return None
+
+
+def _backward_kernel_head_dim(head_dim: int) -> Optional[int]:
+    if head_dim <= 64:
+        return 64
     if head_dim <= 128:
         return 128
     return None
@@ -318,8 +332,14 @@ def _select_varlen_alibi(alibi_slopes: Optional[torch.Tensor], batch_idx: int) -
 def _maybe_raise_for_banned_sm75(q: torch.Tensor, reason: Optional[str]) -> None:
     if reason is None:
         return
-    if ban_fallbacks_enabled() and _is_sm75_tensor(q):
-        raise RuntimeError(f"No SM75 native kernel is available for this call; fallback is disabled: {reason}")
+    # On Turing this fork treats the SM75 backend as authoritative: an
+    # unsupported SM75 call must fail visibly instead of silently running a
+    # different production backend.
+    if _is_sm75_tensor(q):
+        raise RuntimeError(
+            "No SM75 native kernel is available for this call; "
+            f"upstream fallback is disabled on SM75: {reason}"
+        )
 
 
 def _to_fp16_for_sm75(x: torch.Tensor) -> torch.Tensor:
@@ -361,11 +381,112 @@ def _apply_rotary_sm75(
     return torch.cat((out_rot, x_sm75[..., rotary_dim:]), dim=-1)
 
 
-def _prepare_for_sm75_kernel(x: torch.Tensor, kernel_head_dim: int) -> torch.Tensor:
-    x = _to_fp16_for_sm75(x)
+def _prepare_for_sm75_kernel(
+    x: torch.Tensor, kernel_head_dim: int, preserve_strides: bool = True
+) -> torch.Tensor:
+    if x.dtype == torch.bfloat16:
+        x = x.to(torch.float16)
+    if kernel_head_dim in (96, 256) and (
+        (64 < x.shape[-1] <= 96) or (192 < x.shape[-1] <= 256)
+    ):
+        kernel_head_dim = x.shape[-1]
     if x.shape[-1] == kernel_head_dim:
+        if x.stride(-1) != 1 or not preserve_strides:
+            return x.contiguous()
         return x
     return torch.nn.functional.pad(x, [0, kernel_head_dim - x.shape[-1]]).contiguous()
+
+
+def _prepare_qkv_for_sm75_kernel(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    kernel_head_dim: int,
+    use_native_pad: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if (
+        use_native_pad
+        and q.dtype == torch.float16
+        and k.dtype == torch.float16
+        and v.dtype == torch.float16
+        and q.is_cuda
+        and k.is_cuda
+        and v.is_cuda
+        and q.shape[-1] == 96
+        and q.shape[-1] < kernel_head_dim
+        and hasattr(_sm75_cuda, "pad_qkv_head_dim")
+    ):
+        return tuple(_sm75_cuda.pad_qkv_head_dim(q, k, v, int(kernel_head_dim)))
+    return tuple(_prepare_for_sm75_kernel(x, kernel_head_dim) for x in (q, k, v))
+
+
+def try_qkvpacked_forward_fast(
+    qkv: torch.Tensor,
+    dropout_p: float,
+    softmax_scale: float,
+    causal: bool,
+    window_size_left: int,
+    window_size_right: int,
+    softcap: float,
+    alibi_slopes: Optional[torch.Tensor],
+    return_attn_probs: bool,
+) -> Optional[torch.Tensor]:
+    """Low-overhead direct-strided launch for packed inference fast paths."""
+    if (
+        _sm75_cuda is None
+        or qkv.dim() != 5
+        or qkv.shape[2] != 3
+        or qkv.shape[-1] not in (64, 80, 96, 128, 192, 224, 256)
+        or qkv.dtype != torch.float16
+        or qkv.stride(-1) != 1
+        or dropout_p != 0.0
+        or window_size_left != -1
+        or window_size_right != -1
+        or softcap != 0.0
+        or alibi_slopes is not None
+        or return_attn_probs
+        or not _is_sm75_tensor(qkv)
+    ):
+        return None
+    head_dim = qkv.shape[-1]
+    mask = "causal" if causal else "noncausal"
+    if head_dim == 64:
+        if not hasattr(_sm75_cuda, "fwd_qkvpacked_hd64_fa2"):
+            return None
+        out, _ = _sm75_cuda.fwd_qkvpacked_hd64_fa2(
+            qkv, float(softmax_scale), bool(causal)
+        )
+        backend = (
+            "sm75_native_qkvpacked_direct_packedtensor_"
+            f"dense_hd64_fa2_tiled_headmajor_kernel64_{mask}_mha_fp16"
+        )
+    else:
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        if head_dim in (80, 96):
+            out, _ = _sm75_cuda.fwd_hd96_fa2(
+                q, k, v, float(softmax_scale), bool(causal)
+            )
+            backend_kind = f"dense_hd{head_dim}_fa2_tiled_kernel96"
+        elif head_dim in (224, 256):
+            out, _ = _sm75_cuda.fwd_hd256_fa2(
+                q, k, v, float(softmax_scale), bool(causal)
+            )
+            backend_kind = f"dense_hd{head_dim}_fa2_tiled_kernel256"
+        else:
+            out, _ = _sm75_cuda.fwd(
+                q, k, v, float(softmax_scale), bool(causal)
+            )
+            backend_kind = (
+                "fwd_hd128_kernel128"
+                if head_dim == 128
+                else "dense_hd192_tiled_kernel192"
+            )
+        backend = (
+            f"sm75_native_qkvpacked_direct_strided_{backend_kind}_"
+            f"{mask}_mha_fp16"
+        )
+    _set_last_backend(backend)
+    return out
 
 
 def try_forward(
@@ -380,6 +501,8 @@ def try_forward(
     softcap: float,
     alibi_slopes: Optional[torch.Tensor],
     return_softmax: bool,
+    use_native_pad: bool = False,
+    packed_layout: bool = False,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
     reason = _forward_rejection(
         q,
@@ -407,10 +530,51 @@ def try_forward(
         and not return_softmax
     )
     if use_fast_kernel:
-        q_sm75, k_sm75, v_sm75 = (_prepare_for_sm75_kernel(x, kernel_head_dim) for x in (q, k, v))
-        out, softmax_lse = _sm75_cuda.fwd(q_sm75, k_sm75, v_sm75, float(softmax_scale), bool(causal))
+        q_sm75, k_sm75, v_sm75 = _prepare_qkv_for_sm75_kernel(
+            q, k, v, kernel_head_dim, use_native_pad=use_native_pad
+        )
+        use_hd64_mha_fa2 = (
+            kernel_head_dim == 64
+            and q.shape[-1] == 64
+            and q.shape[-2] == k.shape[-2]
+            and not causal
+        )
+        if use_hd64_mha_fa2:
+            out, softmax_lse = _sm75_cuda.fwd_hd64_fa2(
+                q_sm75,
+                k_sm75,
+                v_sm75,
+                float(softmax_scale),
+                bool(causal),
+                bool(packed_layout),
+            )
+        elif kernel_head_dim == 96:
+            out, softmax_lse = _sm75_cuda.fwd_hd96_fa2(
+                q_sm75, k_sm75, v_sm75, float(softmax_scale), bool(causal)
+            )
+        elif kernel_head_dim == 256:
+            out, softmax_lse = _sm75_cuda.fwd_hd256_fa2(
+                q_sm75, k_sm75, v_sm75, float(softmax_scale), bool(causal)
+            )
+        else:
+            out, softmax_lse = _sm75_cuda.fwd(
+                q_sm75, k_sm75, v_sm75, float(softmax_scale), bool(causal)
+            )
         out = out[..., : q.shape[-1]]
-        backend_kind = f"fwd_hd{q.shape[-1]}_kernel{kernel_head_dim}"
+        if use_hd64_mha_fa2:
+            backend_kind = (
+                "dense_hd64_fa2_tiled_headmajor_kernel64"
+                if packed_layout
+                else "dense_hd64_fa2_tiled_kernel64"
+            )
+        elif kernel_head_dim == 96:
+            backend_kind = f"dense_hd{q.shape[-1]}_fa2_tiled_kernel96"
+        elif kernel_head_dim == 256:
+            backend_kind = f"dense_hd{q.shape[-1]}_fa2_tiled_kernel256"
+        elif kernel_head_dim is not None and kernel_head_dim > 128 and q.shape[-1] > 128:
+            backend_kind = f"dense_hd{q.shape[-1]}_tiled_kernel{kernel_head_dim}"
+        else:
+            backend_kind = f"fwd_hd{q.shape[-1]}_kernel{kernel_head_dim}"
     else:
         q_sm75, k_sm75, v_sm75 = (_to_fp16_for_sm75(x) for x in (q, k, v))
         alibi_sm75 = (
@@ -431,7 +595,26 @@ def try_forward(
             float(softcap),
             bool(return_softmax),
         )
-        backend_kind = f"generic_fwd_hd{q.shape[-1]}"
+        warp_wide_bridge = (
+            q.shape[-1] >= 224
+            and q.shape[-1] <= 256
+            and k.shape[-3] >= 128
+            and dropout_p == 0.0
+            and window_size_left == -1
+            and window_size_right == -1
+            and softcap == 0.0
+            and alibi_slopes is None
+            and not return_softmax
+        )
+        splitkv_splits = (k.shape[-3] + 255) // 256
+        splitkv_partial_elements = q.shape[0] * q.shape[-3] * q.shape[-2] * splitkv_splits * q.shape[-1]
+        splitkv_bridge = warp_wide_bridge and splitkv_partial_elements <= 80_000_000
+        if warp_wide_bridge:
+            backend_kind = f"generic_warp_fwd_hd{q.shape[-1]}"
+        elif splitkv_bridge:
+            backend_kind = f"generic_splitkv_fwd_hd{q.shape[-1]}"
+        else:
+            backend_kind = f"generic_fwd_hd{q.shape[-1]}"
     out = _restore_sm75_output_dtype(out, q)
     if not return_softmax:
         s_dmask = torch.empty((0,), dtype=out.dtype, device=out.device)
@@ -446,6 +629,80 @@ def try_forward(
         f"{'_local' if window_size_left != -1 or window_size_right != -1 else ''}"
     )
     return out, softmax_lse, s_dmask, rng_state
+
+
+def try_packed_forward(
+    packed_kind: str,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dropout_p: float,
+    softmax_scale: float,
+    causal: bool,
+    window_size_left: int,
+    window_size_right: int,
+    softcap: float,
+    alibi_slopes: Optional[torch.Tensor],
+    return_softmax: bool,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Inference fast path for public packed APIs.
+
+    The SM75 kernels already consume Q/K/V strides, so packed tensors can be
+    sliced into strided views and launched directly without the autograd
+    Function wrapper used by the generic public API path.
+    """
+    if packed_kind not in {"qkvpacked", "kvpacked"}:
+        raise ValueError(f"unknown packed_kind {packed_kind!r}")
+    kernel_head_dim = _kernel_head_dim(q.shape[-1])
+    needs_pad = (
+        kernel_head_dim is not None
+        and kernel_head_dim != q.shape[-1]
+        and not (kernel_head_dim == 96 and q.shape[-1] > 64)
+        and not (kernel_head_dim == 256 and q.shape[-1] > 192)
+    )
+    needs_dtype_cast = q.dtype == torch.bfloat16
+    needs_last_dim_copy = any(x.stride(-1) != 1 for x in (q, k, v))
+    uses_native_pad = (
+        needs_pad
+        and q.shape[-1] == 96
+        and q.dtype == torch.float16
+        and hasattr(_sm75_cuda, "pad_qkv_head_dim")
+    )
+
+    result = try_forward(
+        q,
+        k,
+        v,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size_left,
+        window_size_right,
+        softcap,
+        alibi_slopes,
+        return_softmax,
+        use_native_pad=True,
+        packed_layout=True,
+    )
+    if result is None:
+        return None
+
+    base_backend = get_last_backend() or "sm75_native_unknown"
+    backend_tail = (
+        base_backend[len("sm75_native_") :]
+        if base_backend.startswith("sm75_native_")
+        else base_backend
+    )
+    layout_bits = []
+    if needs_pad:
+        layout_bits.append("nativepad" if uses_native_pad else "padded")
+    if needs_dtype_cast:
+        layout_bits.append("fp16_compute")
+    if needs_last_dim_copy:
+        layout_bits.append("lastdim_copy")
+    layout_tag = "strided" if not layout_bits else "_".join(layout_bits)
+    _set_last_backend(f"sm75_native_{packed_kind}_direct_{layout_tag}_{backend_tail}")
+    return result
 
 
 def try_varlen_forward(
@@ -681,20 +938,52 @@ def try_varlen_forward(
     )
     if use_fast_kernel:
         q_sm75, k_sm75, v_sm75 = (_prepare_for_sm75_kernel(x, kernel_head_dim) for x in (q, k, v))
-        out, softmax_lse = _sm75_cuda.varlen_fwd(
-            q_sm75,
-            k_sm75,
-            v_sm75,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            int(max_seqlen_q),
-            int(max_seqlen_k),
-            float(softmax_scale),
-            bool(causal),
-        )
+        if kernel_head_dim == 96:
+            out, softmax_lse = _sm75_cuda.varlen_fwd_hd96_fa2(
+                q_sm75,
+                k_sm75,
+                v_sm75,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                int(max_seqlen_q),
+                int(max_seqlen_k),
+                float(softmax_scale),
+                bool(causal),
+            )
+        elif kernel_head_dim == 256:
+            out, softmax_lse = _sm75_cuda.varlen_fwd_hd256_fa2(
+                q_sm75,
+                k_sm75,
+                v_sm75,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                int(max_seqlen_q),
+                int(max_seqlen_k),
+                float(softmax_scale),
+                bool(causal),
+            )
+        else:
+            out, softmax_lse = _sm75_cuda.varlen_fwd(
+                q_sm75,
+                k_sm75,
+                v_sm75,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                int(max_seqlen_q),
+                int(max_seqlen_k),
+                float(softmax_scale),
+                bool(causal),
+            )
         out = out[..., : q.shape[-1]]
         s_dmask = torch.empty((0,), dtype=out.dtype, device=out.device)
-        backend_kind = f"varlen_fwd_hd{q.shape[-1]}_kernel{kernel_head_dim}"
+        if kernel_head_dim == 96:
+            backend_kind = f"varlen_dense_hd{q.shape[-1]}_fa2_tiled_kernel96"
+        elif kernel_head_dim == 256:
+            backend_kind = f"varlen_dense_hd{q.shape[-1]}_fa2_tiled_kernel256"
+        elif kernel_head_dim is not None and kernel_head_dim > 128 and q.shape[-1] > 128:
+            backend_kind = f"varlen_dense_hd{q.shape[-1]}_tiled_kernel{kernel_head_dim}"
+        else:
+            backend_kind = f"varlen_fwd_hd{q.shape[-1]}_kernel{kernel_head_dim}"
     else:
         offsets_reason, q_offsets, k_offsets = _varlen_offsets(
             q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k
@@ -801,9 +1090,10 @@ def try_backward(
     if reason is not None:
         return None
 
-    kernel_head_dim = _kernel_head_dim(q.shape[-1])
+    kernel_head_dim = _backward_kernel_head_dim(q.shape[-1])
     use_fast_kernel = (
         kernel_head_dim is not None
+        and kernel_head_dim <= 128
         and dropout_p == 0.0
         and window_size_left == -1
         and window_size_right == -1
@@ -812,7 +1102,8 @@ def try_backward(
     )
     if use_fast_kernel:
         q_sm75, k_sm75, v_sm75, out_sm75, dout_sm75 = (
-            _prepare_for_sm75_kernel(x, kernel_head_dim) for x in (q, k, v, out, dout)
+            _prepare_for_sm75_kernel(x, kernel_head_dim, preserve_strides=False)
+            for x in (q, k, v, out, dout)
         )
         dq_sm75, dk_sm75, dv_sm75 = _sm75_cuda.bwd(
             q_sm75,
@@ -904,9 +1195,10 @@ def try_varlen_backward(
     if reason is not None:
         return None
 
-    kernel_head_dim = _kernel_head_dim(q.shape[-1])
+    kernel_head_dim = _backward_kernel_head_dim(q.shape[-1])
     use_fast_kernel = (
         kernel_head_dim is not None
+        and kernel_head_dim <= 128
         and dropout_p == 0.0
         and window_size_left == -1
         and window_size_right == -1
@@ -915,7 +1207,8 @@ def try_varlen_backward(
     )
     if use_fast_kernel:
         q_sm75, k_sm75, v_sm75, out_sm75, dout_sm75 = (
-            _prepare_for_sm75_kernel(x, kernel_head_dim) for x in (q, k, v, out, dout)
+            _prepare_for_sm75_kernel(x, kernel_head_dim, preserve_strides=False)
+            for x in (q, k, v, out, dout)
         )
         dq_sm75, dk_sm75, dv_sm75 = _sm75_cuda.varlen_bwd(
             q_sm75,
@@ -1116,11 +1409,80 @@ def try_kvcache_forward(
 
     q_attention = q
     k_update = k
-    if rotary_cos is not None:
+    fused_paged_update = False
+    cache_seqlens_after_tensor = None
+    sequential_q_positions = causal or window_size_left != -1 or window_size_right != -1
+    can_fused_paged_update = (
+        paged_cache
+        and k is not None
+        and v is not None
+        and q.dtype == torch.float16
+        and k.dtype == torch.float16
+        and v.dtype == torch.float16
+        and k_cache.dtype == torch.float16
+        and v_cache.dtype == torch.float16
+        and q.is_contiguous()
+        and k.is_contiguous()
+        and v.is_contiguous()
+        and k_cache.is_contiguous()
+        and v_cache.is_contiguous()
+        and block_table is not None
+        and block_table.is_cuda
+        and block_table.dtype == torch.int32
+        and block_table.is_contiguous()
+        and cache_seqlens is not None
+        and cache_seqlens.is_cuda
+        and cache_seqlens.dtype == torch.int32
+        and cache_seqlens.is_contiguous()
+        and seqlen_q <= 8
+        and q.shape[-1] <= 128
+        and softcap == 0.0
+        and alibi_slopes is None
+        and (cache_batch_idx is None or (
+            cache_batch_idx.is_cuda and cache_batch_idx.dtype == torch.int32 and cache_batch_idx.is_contiguous()
+        ))
+        and (cache_leftpad is None or (
+            cache_leftpad.is_cuda and cache_leftpad.dtype == torch.int32 and cache_leftpad.is_contiguous()
+        ))
+        and (rotary_cos is None or (
+            rotary_cos.is_contiguous() and rotary_sin is not None and rotary_sin.is_contiguous()
+        ))
+    )
+    if can_fused_paged_update and rotary_cos is not None:
+        max_q_pos = max(
+            base + (seqlen_q - 1 if sequential_q_positions else 0)
+            for base in seqlens_before
+        )
+        max_k_pos = max(seqlens_after) - 1
+        if max(max_q_pos, max_k_pos) >= rotary_cos.shape[0]:
+            reason = "rotary cos/sin sequence length is too short for cache positions"
+            _maybe_raise_for_banned_sm75(q, reason)
+            return None
+    if can_fused_paged_update:
+        empty_i32 = torch.empty((0,), dtype=torch.int32, device=q.device)
+        empty_rotary = torch.empty((0,), dtype=q.dtype, device=q.device)
+        q_attention, cache_seqlens_after_tensor = _sm75_cuda.paged_kvcache_update(
+            q,
+            k,
+            v,
+            k_cache,
+            v_cache,
+            block_table,
+            cache_seqlens,
+            empty_i32 if cache_batch_idx is None else cache_batch_idx,
+            empty_rotary if rotary_cos is None else rotary_cos,
+            empty_rotary if rotary_sin is None else rotary_sin,
+            bool(rotary_interleaved),
+            bool(sequential_q_positions),
+        )
+        k_update = None
+        fused_paged_update = True
+
+    if not fused_paged_update and rotary_cos is not None:
         base_positions = torch.tensor(seqlens_before, dtype=torch.long, device=q.device)
         q_offsets = (
             base_positions[:, None] + torch.arange(seqlen_q, dtype=torch.long, device=q.device)[None, :]
-            if causal or window_size_left != -1 or window_size_right != -1
+            if sequential_q_positions
             else base_positions[:, None].expand(batch_size, seqlen_q)
         )
         k_offsets = base_positions[:, None] + torch.arange(seqlen_new, dtype=torch.long, device=q.device)[None, :]
@@ -1132,7 +1494,7 @@ def try_kvcache_forward(
         q_attention = _apply_rotary_sm75(q, rotary_cos, rotary_sin, q_offsets, rotary_interleaved)
         k_update = _apply_rotary_sm75(k, rotary_cos, rotary_sin, k_offsets, rotary_interleaved)
 
-    if k_update is not None:
+    if not fused_paged_update and k_update is not None:
         for q_batch, cache_batch in enumerate(batch_indices):
             start = seqlens_before[q_batch]
             end = seqlens_after[q_batch]
@@ -1152,54 +1514,202 @@ def try_kvcache_forward(
 
     if paged_cache:
         page_size = k_cache.shape[1]
-        k_chunks = []
-        v_chunks = []
-        for cache_batch, leftpad, length in zip(batch_indices, cache_leftpads, seqlens_after):
-            num_pages = (length + page_size - 1) // page_size
-            block_ids = block_table[cache_batch, :num_pages].to(device=k_cache.device, dtype=torch.long)
-            k_chunks.append(k_cache.index_select(0, block_ids).reshape(-1, k_cache.shape[2], k_cache.shape[3])[leftpad:length])
-            v_chunks.append(v_cache.index_select(0, block_ids).reshape(-1, v_cache.shape[2], v_cache.shape[3])[leftpad:length])
-        q_packed = q_attention.reshape(batch_size * seqlen_q, q_attention.shape[2], q_attention.shape[3])
-        k_packed = torch.cat(k_chunks, dim=0)
-        v_packed = torch.cat(v_chunks, dim=0)
-        if q_packed.dtype != k_packed.dtype:
-            k_packed = k_packed.to(q_packed.dtype)
-            v_packed = v_packed.to(q_packed.dtype)
-        cu_q = torch.arange(
-            0,
-            (batch_size + 1) * seqlen_q,
-            step=seqlen_q,
-            dtype=torch.int32,
-            device=q.device,
+        result = None
+        path = None
+        can_direct_paged = (
+            q.dtype == torch.float16
+            and k_cache.dtype == torch.float16
+            and v_cache.dtype == torch.float16
+            and seqlen_q <= 8
+            and q.shape[-1] <= 128
+            and softcap == 0.0
+            and alibi_slopes is None
+            and q_attention.is_cuda
+            and k_cache.is_contiguous()
+            and v_cache.is_contiguous()
+            and block_table.is_contiguous()
+            and cache_seqlens is not None
+            and cache_seqlens.is_cuda
+            and cache_seqlens.dtype == torch.int32
+            and cache_seqlens.is_contiguous()
+            and (cache_batch_idx is None or (
+                cache_batch_idx.is_cuda and cache_batch_idx.dtype == torch.int32 and cache_batch_idx.is_contiguous()
+            ))
+            and (cache_leftpad is None or (
+                cache_leftpad.is_cuda and cache_leftpad.dtype == torch.int32 and cache_leftpad.is_contiguous()
+            ))
         )
-        cu_k = torch.zeros(batch_size + 1, dtype=torch.int32, device=q.device)
-        cu_k[1:] = torch.cumsum(torch.tensor(effective_seqlens, dtype=torch.int32, device=q.device), dim=0)
-        result = try_varlen_forward(
-            q_packed,
-            k_packed,
-            v_packed,
-            cu_q,
-            cu_k,
-            seqlen_q,
-            max_seqlen_k,
-            0.0,
-            softmax_scale,
-            causal,
-            window_size_left,
-            window_size_right,
-            softcap,
-            alibi_slopes,
-            False,
-            None,
-            None,
-            None,
-            0,
-        )
+        if can_direct_paged:
+            empty_i32 = torch.empty((0,), dtype=torch.int32, device=q.device)
+            cache_seqlens_after = (
+                cache_seqlens_after_tensor
+                if cache_seqlens_after_tensor is not None
+                else cache_seqlens if seqlen_new == 0 else cache_seqlens + seqlen_new
+            )
+            direct_prefix = "paged_direct_fused_update" if fused_paged_update else "paged_direct"
+            can_fa2_paged = (
+                hasattr(_sm75_cuda, "paged_kvcache_fwd_fa2")
+                and q.shape[-1] in (64, 128)
+                and page_size % 256 == 0
+                and all(leftpad == 0 for leftpad in cache_leftpads)
+                and window_size_left == -1
+                and window_size_right == -1
+            )
+            if can_fa2_paged:
+                out, softmax_lse = _sm75_cuda.paged_kvcache_fwd_fa2(
+                    _to_fp16_for_sm75(q_attention),
+                    k_cache,
+                    v_cache,
+                    block_table,
+                    cache_seqlens_after,
+                    empty_i32 if cache_batch_idx is None else cache_batch_idx,
+                    empty_i32,
+                    float(softmax_scale),
+                    bool(causal),
+                    int(window_size_left),
+                    int(window_size_right),
+                    int(max_seqlen_k),
+                    0,
+                )
+                path = f"{direct_prefix}_fa2_tiled_splitkv"
+            else:
+                out, softmax_lse = _sm75_cuda.paged_kvcache_fwd(
+                    _to_fp16_for_sm75(q_attention),
+                    k_cache,
+                    v_cache,
+                    block_table,
+                    cache_seqlens_after,
+                    empty_i32 if cache_batch_idx is None else cache_batch_idx,
+                    empty_i32 if cache_leftpad is None else cache_leftpad,
+                    float(softmax_scale),
+                    bool(causal),
+                    int(window_size_left),
+                    int(window_size_right),
+                    int(max_seqlen_k),
+                )
+                path = f"{direct_prefix}_wmma_splitkv"
+            result = (out, softmax_lse, None, None)
+        if (
+            result is None
+            and cache_batch_idx is None
+            and all(leftpad == 0 for leftpad in cache_leftpads)
+            and all(length == max_seqlen_k for length in effective_seqlens)
+        ):
+            num_pages = (max_seqlen_k + page_size - 1) // page_size
+            actual_blocks = block_table[:batch_size, :num_pages]
+            first_block = int(actual_blocks[0, 0].item())
+            expected_blocks = torch.arange(
+                first_block,
+                first_block + batch_size * num_pages,
+                dtype=block_table.dtype,
+                device=block_table.device,
+            ).reshape(batch_size, num_pages)
+            if bool(torch.equal(actual_blocks, expected_blocks)):
+                k_dense = k_cache.narrow(0, first_block, batch_size * num_pages).reshape(
+                    batch_size, num_pages * page_size, k_cache.shape[2], k_cache.shape[3]
+                )[:, :max_seqlen_k]
+                v_dense = v_cache.narrow(0, first_block, batch_size * num_pages).reshape(
+                    batch_size, num_pages * page_size, v_cache.shape[2], v_cache.shape[3]
+                )[:, :max_seqlen_k]
+                if q_attention.dtype != k_dense.dtype:
+                    k_dense = k_dense.to(q_attention.dtype)
+                    v_dense = v_dense.to(q_attention.dtype)
+                result = try_forward(
+                    q_attention,
+                    k_dense,
+                    v_dense,
+                    0.0,
+                    softmax_scale,
+                    causal,
+                    window_size_left,
+                    window_size_right,
+                    softcap,
+                    alibi_slopes,
+                    False,
+                )
+                path = "paged_view_dense" if result is not None else None
+        if (
+            result is None
+            and all(leftpad == 0 for leftpad in cache_leftpads)
+            and all(length == max_seqlen_k for length in effective_seqlens)
+        ):
+            num_pages = (max_seqlen_k + page_size - 1) // page_size
+            block_rows = block_table[:batch_size] if batch_index_tensor is None else block_table.index_select(0, batch_index_tensor)
+            selected_blocks = block_rows[:, :num_pages]
+            if bool(torch.all((selected_blocks >= 0) & (selected_blocks < k_cache.shape[0]))):
+                flat_blocks = selected_blocks.reshape(-1).to(device=k_cache.device, dtype=torch.long)
+                k_dense = k_cache.index_select(0, flat_blocks).reshape(
+                    batch_size, num_pages * page_size, k_cache.shape[2], k_cache.shape[3]
+                )[:, :max_seqlen_k]
+                v_dense = v_cache.index_select(0, flat_blocks).reshape(
+                    batch_size, num_pages * page_size, v_cache.shape[2], v_cache.shape[3]
+                )[:, :max_seqlen_k]
+                if q_attention.dtype != k_dense.dtype:
+                    k_dense = k_dense.to(q_attention.dtype)
+                    v_dense = v_dense.to(q_attention.dtype)
+                result = try_forward(
+                    q_attention,
+                    k_dense,
+                    v_dense,
+                    0.0,
+                    softmax_scale,
+                    causal,
+                    window_size_left,
+                    window_size_right,
+                    softcap,
+                    alibi_slopes,
+                    False,
+                )
+                path = "paged_gather_dense" if result is not None else None
+        if result is None:
+            k_chunks = []
+            v_chunks = []
+            for cache_batch, leftpad, length in zip(batch_indices, cache_leftpads, seqlens_after):
+                num_pages = (length + page_size - 1) // page_size
+                block_ids = block_table[cache_batch, :num_pages].to(device=k_cache.device, dtype=torch.long)
+                k_chunks.append(k_cache.index_select(0, block_ids).reshape(-1, k_cache.shape[2], k_cache.shape[3])[leftpad:length])
+                v_chunks.append(v_cache.index_select(0, block_ids).reshape(-1, v_cache.shape[2], v_cache.shape[3])[leftpad:length])
+            q_packed = q_attention.reshape(batch_size * seqlen_q, q_attention.shape[2], q_attention.shape[3])
+            k_packed = torch.cat(k_chunks, dim=0)
+            v_packed = torch.cat(v_chunks, dim=0)
+            if q_packed.dtype != k_packed.dtype:
+                k_packed = k_packed.to(q_packed.dtype)
+                v_packed = v_packed.to(q_packed.dtype)
+            cu_q = torch.arange(
+                0,
+                (batch_size + 1) * seqlen_q,
+                step=seqlen_q,
+                dtype=torch.int32,
+                device=q.device,
+            )
+            cu_k = torch.zeros(batch_size + 1, dtype=torch.int32, device=q.device)
+            cu_k[1:] = torch.cumsum(torch.tensor(effective_seqlens, dtype=torch.int32, device=q.device), dim=0)
+            result = try_varlen_forward(
+                q_packed,
+                k_packed,
+                v_packed,
+                cu_q,
+                cu_k,
+                seqlen_q,
+                max_seqlen_k,
+                0.0,
+                softmax_scale,
+                causal,
+                window_size_left,
+                window_size_right,
+                softcap,
+                alibi_slopes,
+                False,
+                None,
+                None,
+                None,
+                0,
+            )
+            path = "paged_repack_varlen"
         if result is None:
             return None
         out_packed, softmax_lse, _, _ = result
         out = out_packed.reshape_as(q)
-        path = "paged"
     else:
         selected_k_cache = k_cache[:batch_size] if batch_index_tensor is None else k_cache.index_select(0, batch_index_tensor)
         selected_v_cache = v_cache[:batch_size] if batch_index_tensor is None else v_cache.index_select(0, batch_index_tensor)

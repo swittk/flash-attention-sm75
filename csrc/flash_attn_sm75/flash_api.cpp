@@ -15,6 +15,55 @@ std::vector<at::Tensor> mha_fwd_generic_sm75(
     float softcap,
     bool return_softmax);
 
+std::vector<at::Tensor> mha_fwd_hd256_fa2_sm75(
+    at::Tensor q,
+    at::Tensor k,
+    at::Tensor v,
+    float softmax_scale,
+    bool causal);
+
+std::vector<at::Tensor> mha_fwd_hd96_fa2_sm75(
+    at::Tensor q,
+    at::Tensor k,
+    at::Tensor v,
+    float softmax_scale,
+    bool causal);
+
+std::vector<at::Tensor> mha_fwd_hd64_fa2_sm75(
+    at::Tensor q,
+    at::Tensor k,
+    at::Tensor v,
+    float softmax_scale,
+    bool causal,
+    bool head_major);
+
+std::vector<at::Tensor> mha_fwd_qkvpacked_hd64_fa2_sm75(
+    at::Tensor qkv,
+    float softmax_scale,
+    bool causal);
+
+std::vector<at::Tensor> mha_varlen_fwd_hd96_fa2_sm75(
+    at::Tensor q,
+    at::Tensor k,
+    at::Tensor v,
+    at::Tensor cu_seqlens_q,
+    at::Tensor cu_seqlens_k,
+    int max_seqlen_q,
+    int max_seqlen_k,
+    float softmax_scale,
+    bool causal);
+
+std::vector<at::Tensor> mha_varlen_fwd_hd256_fa2_sm75(
+    at::Tensor q,
+    at::Tensor k,
+    at::Tensor v,
+    at::Tensor cu_seqlens_q,
+    at::Tensor cu_seqlens_k,
+    int max_seqlen_q,
+    int max_seqlen_k,
+    float softmax_scale,
+    bool causal);
+
 std::vector<at::Tensor> mha_bwd_generic_sm75(
     at::Tensor q,
     at::Tensor k,
@@ -27,6 +76,55 @@ std::vector<at::Tensor> mha_bwd_generic_sm75(
     float dropout_p,
     at::Tensor alibi_slopes,
     float softcap);
+
+std::vector<at::Tensor> mha_paged_kvcache_fwd_sm75(
+    at::Tensor q,
+    at::Tensor k_cache,
+    at::Tensor v_cache,
+    at::Tensor block_table,
+    at::Tensor cache_seqlens,
+    at::Tensor cache_batch_idx,
+    at::Tensor cache_leftpad,
+    const float softmax_scale,
+    bool causal,
+    int window_left,
+    int window_right,
+    int max_seqlen_k);
+
+std::vector<at::Tensor> mha_paged_kvcache_fwd_fa2_sm75(
+    at::Tensor q,
+    at::Tensor k_cache,
+    at::Tensor v_cache,
+    at::Tensor block_table,
+    at::Tensor cache_seqlens,
+    at::Tensor cache_batch_idx,
+    at::Tensor cache_leftpad,
+    float softmax_scale,
+    bool causal,
+    int window_left,
+    int window_right,
+    int max_seqlen_k,
+    int num_splits);
+
+std::vector<at::Tensor> paged_kvcache_update_sm75(
+    at::Tensor q,
+    at::Tensor k,
+    at::Tensor v,
+    at::Tensor k_cache,
+    at::Tensor v_cache,
+    at::Tensor block_table,
+    at::Tensor cache_seqlens,
+    at::Tensor cache_batch_idx,
+    at::Tensor rotary_cos,
+    at::Tensor rotary_sin,
+    bool rotary_interleaved,
+    bool sequential_q_positions);
+
+std::vector<at::Tensor> pad_qkv_head_dim_sm75(
+    at::Tensor q,
+    at::Tensor k,
+    at::Tensor v,
+    int64_t padded_head_dim);
 
 void set_params_fprop(Flash_fwd_params &params,
                       // sizes
@@ -62,23 +160,21 @@ void set_params_fprop(Flash_fwd_params &params,
     params.l_ptr = reinterpret_cast<float*>(l.data_ptr());
 
 
-    // All stride are in elements, not bytes.
-    // params.q_row_stride = q.stride(-3);
-    // params.k_row_stride = k.stride(-3);
-    // params.v_row_stride = v.stride(-3);
-    // params.q_head_stride = q.stride(-2);
-    // params.k_head_stride = k.stride(-2);
-    // params.v_head_stride = v.stride(-2);
+    // All strides are in elements, not bytes. Dense tensors are rank-4
+    // [B, S, H, D]; varlen tensors are rank-3 [total, H, D].
+    params.q_batch_stride = q.dim() == 4 ? q.stride(0) : 0;
+    params.k_batch_stride = k.dim() == 4 ? k.stride(0) : 0;
+    params.v_batch_stride = v.dim() == 4 ? v.stride(0) : 0;
+    params.q_row_stride = q.stride(-3);
+    params.k_row_stride = k.stride(-3);
+    params.v_row_stride = v.stride(-3);
+    params.q_head_stride = q.stride(-2);
+    params.k_head_stride = k.stride(-2);
+    params.v_head_stride = v.stride(-2);
 
-    // params.o_row_stride = out.stride(-3);
-    // params.o_head_stride = out.stride(-2);
-
-    // if (cu_seqlens_q_d == nullptr) {
-    //     params.q_batch_stride = q.stride(0);
-    //     params.k_batch_stride = k.stride(0);
-    //     params.v_batch_stride = v.stride(0);
-    //     params.o_batch_stride = out.stride(0);
-    // }
+    params.o_batch_stride = out.dim() == 4 ? out.stride(0) : 0;
+    params.o_row_stride = out.stride(-3);
+    params.o_head_stride = out.stride(-2);
 
 
 
@@ -167,7 +263,7 @@ void set_params_dgrad(Flash_bwd_params &params,
 
 
 void run_mha_fwd(Flash_fwd_params &params){
-    HEADDIM_SWITCH(params.d, [&] {
+    FWD_HEADDIM_SWITCH(params.d, [&] {
         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
                 run_mha_fwd_<kHeadDim, Is_causal>(params);
         });
@@ -213,10 +309,10 @@ mha_fwd(at::Tensor q,
     TORCH_CHECK(k.size(3) == head_size && v.size(3) == head_size, "q/k/v head_dim must match");
     TORCH_CHECK(num_heads % num_heads_k == 0, "num_heads_q must be divisible by num_heads_k for GQA/MQA");
 
-    at::Tensor o = torch::zeros(q.sizes(), q.options().dtype(torch::kFloat16));
+    at::Tensor o = torch::empty(q.sizes(), q.options().dtype(torch::kFloat16));
 
     std::vector<int64_t> size = {batch_size, num_heads, seqlen_q};
-    at::Tensor l = torch::zeros(size, q.options().dtype(torch::kFloat32).device(device));
+    at::Tensor l = torch::empty(size, q.options().dtype(torch::kFloat32).device(device));
 
     TORCH_CHECK(o.is_cuda(), "Tensor o is not on CUDA");
 
@@ -512,5 +608,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("varlen_fwd", &mha_varlen_fwd, "Varlen forward pass");
     m.def("varlen_bwd", &mha_varlen_bwd, "Varlen backward pass");
     m.def("fwd_generic", &mha_fwd_generic_sm75, "Generic SM75 forward pass");
+    m.def("fwd_hd64_fa2", &mha_fwd_hd64_fa2_sm75, "Tiled FA2 SM75 head-dim 64 MHA forward pass");
+    m.def("fwd_qkvpacked_hd64_fa2", &mha_fwd_qkvpacked_hd64_fa2_sm75, "Direct packed tiled FA2 SM75 head-dim 64 forward pass");
+    m.def("fwd_hd96_fa2", &mha_fwd_hd96_fa2_sm75, "Tiled FA2 SM75 head-dim 96 forward pass");
+    m.def("varlen_fwd_hd96_fa2", &mha_varlen_fwd_hd96_fa2_sm75, "Tiled FA2 SM75 head-dim 96 varlen forward pass");
+    m.def("fwd_hd256_fa2", &mha_fwd_hd256_fa2_sm75, "Tiled FA2 SM75 head-dim 256 forward pass");
+    m.def("varlen_fwd_hd256_fa2", &mha_varlen_fwd_hd256_fa2_sm75, "Tiled FA2 SM75 head-dim 256 varlen forward pass");
     m.def("bwd_generic", &mha_bwd_generic_sm75, "Generic SM75 backward pass");
+    m.def("pad_qkv_head_dim", &pad_qkv_head_dim_sm75, "Native SM75 Q/K/V head-dim padding helper");
+    m.def("paged_kvcache_update", &paged_kvcache_update_sm75, "Native SM75 paged KV-cache update with optional rotary");
+    m.def("paged_kvcache_fwd", &mha_paged_kvcache_fwd_sm75, "Direct paged SM75 KV-cache forward pass");
+    m.def("paged_kvcache_fwd_fa2", &mha_paged_kvcache_fwd_fa2_sm75, "Tiled FA2 paged SM75 KV-cache forward pass");
 }

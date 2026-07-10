@@ -13,12 +13,15 @@ struct Qkv_params {
     // index_t q_batch_stride;
     // index_t k_batch_stride;
     // index_t v_batch_stride;
-    // index_t q_row_stride;
-    // index_t k_row_stride;
-    // index_t v_row_stride;
-    // index_t q_head_stride;
-    // index_t k_head_stride;
-    // index_t v_head_stride;
+    index_t q_batch_stride;
+    index_t k_batch_stride;
+    index_t v_batch_stride;
+    index_t q_row_stride;
+    index_t k_row_stride;
+    index_t v_row_stride;
+    index_t q_head_stride;
+    index_t k_head_stride;
+    index_t v_head_stride;
 
     // The number of heads.
     int h;

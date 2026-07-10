@@ -37,8 +37,13 @@ struct Flash_kernel_traits {
 #endif
 
 #if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 750
+#ifdef FLASHATTN_ENABLE_SM75
+    using SmemCopyAtom = Copy_Atom<SM75_U32x2_LDSM_N, elem_type>;
+    using SmemCopyAtomTransposed = Copy_Atom<SM75_U16x4_LDSM_T, elem_type>;
+#else
     using SmemCopyAtom = Copy_Atom<SM75_U32x4_LDSM_N, elem_type>;
     using SmemCopyAtomTransposed = Copy_Atom<SM75_U16x8_LDSM_T, elem_type>;
+#endif
 #else
     using SmemCopyAtom = Copy_Atom<DefaultCopy, elem_type>;
     using SmemCopyAtomTransposed = Copy_Atom<DefaultCopy, elem_type>;
@@ -74,7 +79,11 @@ struct Flash_fwd_kernel_traits : public Base {
     using TiledMma = TiledMMA<
         typename Base::MMA_Atom_Arch,
         Layout<Shape<Int<kNWarps>,_1,_1>>,  // 4x1x1 or 8x1x1 thread group
+#ifdef FLASHATTN_ENABLE_SM75
+        Tile<Int<16 * kNWarps>, _16, _8>>;
+#else
         Tile<Int<16 * kNWarps>, _16, _16>>;
+#endif
 
     using SmemLayoutAtomQ = decltype(
         composition(Swizzle<kSwizzle, 3, 3>{},
@@ -101,7 +110,11 @@ struct Flash_fwd_kernel_traits : public Base {
     using SmemLayoutO = decltype(tile_to_shape(
         SmemLayoutAtomO{},
         Shape<Int<kBlockM>, Int<kHeadDim>>{}));
+#ifdef FLASHATTN_ENABLE_SM75
+    using SmemCopyAtomO = Copy_Atom<DefaultCopy, Element>;
+#else
     using SmemCopyAtomO = Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>;
+#endif
     using SmemCopyAtomOaccum = Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>;
 
     static constexpr int kSmemQSize = size(SmemLayoutQ{}) * sizeof(Element);
@@ -122,17 +135,25 @@ struct Flash_fwd_kernel_traits : public Base {
 
     // We use CACHEGLOBAL instead of CACHEALWAYS for both Q and K/V, since we won't be reading
     // from the same address by the same threadblock. This is slightly faster.
+#if defined(FLASHATTN_ENABLE_SM75) && !defined(FLASHATTN_SM75_VECTOR_GMEM)
+    using Gmem_copy_struct = DefaultCopy;
+#else
     using Gmem_copy_struct = std::conditional_t<
         Has_cp_async,
         SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>,
         AutoVectorizingCopyWithAssumedAlignment<128>
     >;
+#endif
     using GmemTiledCopyQKV = decltype(
         make_tiled_copy(Copy_Atom<Gmem_copy_struct, Element>{},
                         GmemLayoutAtom{},
                         Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per read
     using GmemTiledCopyO = decltype(
+#if defined(FLASHATTN_ENABLE_SM75) && !defined(FLASHATTN_SM75_VECTOR_GMEM_O)
+        make_tiled_copy(Copy_Atom<DefaultCopy, Element>{},
+#else
         make_tiled_copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
+#endif
                         GmemLayoutAtom{},
                         Layout<Shape<_1, _8>>{}));  // Val layout, 8 vals per store
 

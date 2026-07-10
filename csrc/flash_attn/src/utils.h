@@ -204,7 +204,18 @@ __forceinline__ __device__ auto convert_layout_acc_Aregs(Layout acc_layout) {
     constexpr int mma_shape_K = get<2>(typename MMA_traits::Shape_MNK{});
     static_assert(mma_shape_K == 8 || mma_shape_K == 16);
     if constexpr (mma_shape_K == 8) {
+#ifdef FLASHATTN_ENABLE_SM75
+        // The SM75 accumulator is row/column interleaved. Recreate the FA2
+        // release-era A-register ordering before feeding P into the PV MMA.
+        auto rowcol_layout = FLASH_NAMESPACE::convert_layout_acc_rowcol(acc_layout);
+        auto l = logical_divide(rowcol_layout, Shape<X, Shape<X, _1>>{});
+        return make_layout(
+            make_layout(get<1, 0>(l), get<0, 0>(l), get<1, 1, 0>(l)),
+            get<0, 1>(l),
+            get<1, 1, 1>(l));
+#else
         return acc_layout;
+#endif
     } else {
         auto l = logical_divide(acc_layout, Shape<X, X, _2>{});  // (4, MMA_M, (2, MMA_N / 2)))
         return make_layout(make_layout(get<0>(l), get<2, 0>(l)), get<1>(l), get<2, 1>(l));

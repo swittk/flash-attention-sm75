@@ -36,6 +36,18 @@ inline __device__ void compute_attn_1rowblock(
                           const int num_heads_k,
                           const int h_h_k_ratio,
                           const int head_dim,
+                          const int q_batch_stride,
+                          const int k_batch_stride,
+                          const int v_batch_stride,
+                          const int o_batch_stride,
+                          const int q_row_stride,
+                          const int k_row_stride,
+                          const int v_row_stride,
+                          const int o_row_stride,
+                          const int q_head_stride,
+                          const int k_head_stride,
+                          const int v_head_stride,
+                          const int o_head_stride,
                           const float softmax_scale,
                           const int is_casual,
                           const int bidb,
@@ -58,9 +70,9 @@ inline __device__ void compute_attn_1rowblock(
     }
 
 
-    Tensor mQ = make_tensor(make_gmem_ptr(q + binfo.q_offset(num_heads * head_dim, bidb)),
+    Tensor mQ = make_tensor(make_gmem_ptr(q + binfo.q_offset(q_batch_stride, q_row_stride, bidb)),
                             make_shape(seqlen_q, num_heads, head_dim),
-                            make_stride(num_heads * head_dim, head_dim, Int<1>{}));
+                            make_stride(q_row_stride, q_head_stride, Int<1>{}));
 
     Tensor gQ = local_tile(mQ(_, bidh, _), Shape<Int<kBlockM>, Int<kHeadDim>>{},
                            make_coord(m_block, 0));
@@ -68,26 +80,26 @@ inline __device__ void compute_attn_1rowblock(
 
 
 
-    Tensor mK = make_tensor(make_gmem_ptr(k + binfo.k_offset(num_heads_k * head_dim, bidb)),
+    Tensor mK = make_tensor(make_gmem_ptr(k + binfo.k_offset(k_batch_stride, k_row_stride, bidb)),
                             make_shape(seqlen_k, num_heads_k, head_dim),
-                            make_stride(num_heads_k * head_dim, head_dim, Int<1>{}));
+                            make_stride(k_row_stride, k_head_stride, Int<1>{}));
 
     Tensor gK = local_tile(mK(_, bidh / h_h_k_ratio, _), Shape<Int<kBlockN>, Int<kHeadDim>>{},
                            make_coord(_, 0));
 
 
 
-    Tensor mV = make_tensor(make_gmem_ptr(v + binfo.k_offset(num_heads_k * head_dim, bidb)),
+    Tensor mV = make_tensor(make_gmem_ptr(v + binfo.k_offset(v_batch_stride, v_row_stride, bidb)),
                             make_shape(seqlen_k, num_heads_k, head_dim),
-                            make_stride(num_heads_k * head_dim, head_dim, Int<1>{}));
+                            make_stride(v_row_stride, v_head_stride, Int<1>{}));
 
     Tensor gV = local_tile(mV(_, bidh / h_h_k_ratio, _), Shape<Int<kBlockN>, Int<kHeadDim>>{},
                            make_coord(_, 0));
 
 
-    Tensor mO = make_tensor(make_gmem_ptr(o + binfo.q_offset(num_heads * head_dim, bidb)),
+    Tensor mO = make_tensor(make_gmem_ptr(o + binfo.q_offset(o_batch_stride, o_row_stride, bidb)),
                             make_shape(seqlen_q, num_heads, head_dim),
-                            make_stride(num_heads * head_dim, head_dim, Int<1>{}));
+                            make_stride(o_row_stride, o_head_stride, Int<1>{}));
 
     Tensor gO = local_tile(mO(_, bidh, _), Shape<Int<kBlockM>, Int<kHeadDim>>{},
                            make_coord(m_block, 0));
@@ -678,6 +690,18 @@ inline __device__ void compute_attn(half_t* __restrict__ q,
                                       int num_heads_k,
                                       int h_h_k_ratio,
                                       int head_dim,
+                                      int q_batch_stride,
+                                      int k_batch_stride,
+                                      int v_batch_stride,
+                                      int o_batch_stride,
+                                      int q_row_stride,
+                                      int k_row_stride,
+                                      int v_row_stride,
+                                      int o_row_stride,
+                                      int q_head_stride,
+                                      int k_head_stride,
+                                      int v_head_stride,
+                                      int o_head_stride,
                                       float softmax_scale,
                                       int is_casual) {
     const int m_block = blockIdx.x;
@@ -700,6 +724,18 @@ inline __device__ void compute_attn(half_t* __restrict__ q,
                                                     num_heads_k,
                                                     h_h_k_ratio,
                                                     head_dim,
+                                                    q_batch_stride,
+                                                    k_batch_stride,
+                                                    v_batch_stride,
+                                                    o_batch_stride,
+                                                    q_row_stride,
+                                                    k_row_stride,
+                                                    v_row_stride,
+                                                    o_row_stride,
+                                                    q_head_stride,
+                                                    k_head_stride,
+                                                    v_head_stride,
+                                                    o_head_stride,
                                                     softmax_scale,
                                                     is_casual,
                                                     bidb,
