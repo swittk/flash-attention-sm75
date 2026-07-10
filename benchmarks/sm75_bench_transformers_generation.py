@@ -1,6 +1,9 @@
 import argparse
 import gc
 import json
+import os
+import subprocess
+import sys
 import time
 
 import torch
@@ -9,6 +12,9 @@ import torch
 def _load_model(model_id, attn_implementation):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
     tok = AutoTokenizer.from_pretrained(model_id)
     if tok.pad_token_id is None and tok.eos_token_id is not None:
         tok.pad_token = tok.eos_token
@@ -74,6 +80,7 @@ def _run_variant(model_id, prompt_len, new_tokens, attn_impl, warmup):
     del model, tok, inputs, out
     gc.collect()
     torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
     return {
         "attn_implementation": attn_impl,
         "prefill_s": prefill_s,
@@ -143,6 +150,64 @@ def run_case(model_id, prompt_len, new_tokens, warmup):
     }
 
 
+def _write_payload(path, rows, complete):
+    payload = {
+        "matrix": "transformers_generation",
+        "row_count": len(rows),
+        "complete": complete,
+        "rows": rows,
+    }
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp_path, path)
+    return payload
+
+
+def _run_case_subprocess(model_id, prompt_len, new_tokens, warmup, out_path, idx):
+    case_path = f"{out_path}.case{idx}.json"
+    cmd = [
+        sys.executable,
+        __file__,
+        "--models",
+        model_id,
+        "--prompt-lens",
+        str(prompt_len),
+        "--new-tokens",
+        str(new_tokens),
+        "--warmup",
+        str(warmup),
+        "--out",
+        case_path,
+        "--no-isolate-cases",
+    ]
+    env = os.environ.copy()
+    proc = subprocess.run(cmd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.stdout:
+        print(proc.stdout, end="", flush=True)
+    if proc.stderr:
+        print(proc.stderr, end="", file=sys.stderr, flush=True)
+    if proc.returncode != 0:
+        return {
+            "name": f"{model_id}_p{prompt_len}_new{new_tokens}",
+            "family": "transformers_generation",
+            "model": model_id,
+            "prompt_len": prompt_len,
+            "new_tokens": new_tokens,
+            "status": "failed",
+            "failed_stage": "benchmark_subprocess",
+            "error_type": "CalledProcessError",
+            "error": f"exit code {proc.returncode}",
+        }
+    with open(case_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    try:
+        os.remove(case_path)
+    except OSError:
+        pass
+    return payload["rows"][0]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", default=["TinyLlama/TinyLlama-1.1B-Chat-v1.0"])
@@ -151,20 +216,22 @@ def main():
     parser.add_argument("--warmup", type=int, default=0)
     parser.add_argument("--out", "--output", dest="out", default=f"sm75_transformers_generation_{int(time.time())}.json")
     parser.add_argument("--max-cases", type=int, default=0)
+    parser.add_argument("--no-isolate-cases", action="store_true")
     args = parser.parse_args()
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (7, 5):
         raise SystemExit("SM75 CUDA device is required")
     cases = [(m, p, n) for m in args.models for p in args.prompt_lens for n in args.new_tokens]
     if args.max_cases:
         cases = cases[: args.max_cases]
-    rows = [run_case(model_id, prompt_len, new_tokens, args.warmup) for model_id, prompt_len, new_tokens in cases]
-    payload = {
-        "matrix": "transformers_generation",
-        "row_count": len(rows),
-        "rows": rows,
-    }
-    with open(args.out, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+    rows = []
+    for idx, (model_id, prompt_len, new_tokens) in enumerate(cases):
+        if args.no_isolate_cases:
+            row = run_case(model_id, prompt_len, new_tokens, args.warmup)
+        else:
+            row = _run_case_subprocess(model_id, prompt_len, new_tokens, args.warmup, args.out, idx)
+        rows.append(row)
+        _write_payload(args.out, rows, False)
+    payload = _write_payload(args.out, rows, True)
     print(json.dumps(payload, indent=2))
 
 
