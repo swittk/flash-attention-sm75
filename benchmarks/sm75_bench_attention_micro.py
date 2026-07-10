@@ -33,16 +33,17 @@ PREFILL_AXES = {
     "batch": [1, 2, 4],
     "seqlen": [512, 1024, 2048, 4096, 8192, 16384],
     "heads_q_kv": [(32, 32), (32, 8), (16, 1)],
-    "head_dim": [64, 80, 96, 128, 160, 256],
+    "head_dim": [64, 80, 96, 128, 160, 192, 224, 256],
     "causal": [True, False],
+    "layouts": ["dense", "qkvpacked", "kvpacked", "varlen", "varlen_qkvpacked", "varlen_kvpacked"],
 }
 
 VARLEN_AXES = {
-    "total_tokens": [1024, 2048, 4096, 8192, 16384],
-    "num_sequences": [1, 2, 4, 8, 16],
+    "total_tokens": [512, 1024, 2048, 4096, 8192, 16384],
+    "num_sequences": [1, 2, 4],
     "length_distribution": ["uniform", "one_long_many_short", "random_zipf"],
-    "head_dim": [64, 128],
-    "heads_q_kv": [(32, 32), (32, 8)],
+    "head_dim": [64, 80, 96, 128, 160, 192, 224, 256],
+    "heads_q_kv": [(32, 32), (32, 8), (16, 1)],
     "causal": [True, False],
 }
 
@@ -285,13 +286,70 @@ def _broad_shapes():
     return rows
 
 
+def _final_broad_shapes():
+    rows = []
+    for api in ("dense", "qkvpacked", "kvpacked"):
+        for batch in PREFILL_AXES["batch"]:
+            for seqlen in PREFILL_AXES["seqlen"]:
+                for nheads, nheads_k in PREFILL_AXES["heads_q_kv"]:
+                    if api == "qkvpacked" and nheads != nheads_k:
+                        continue
+                    for headdim in PREFILL_AXES["head_dim"]:
+                        for causal in PREFILL_AXES["causal"]:
+                            rows.append(
+                                dict(
+                                    api=api,
+                                    name=(
+                                        f"{api}_b{batch}_s{seqlen}_h{nheads}_{nheads_k}"
+                                        f"_d{headdim}_{'causal' if causal else 'noncausal'}"
+                                    ),
+                                    batch=batch,
+                                    seqlen_q=seqlen,
+                                    seqlen_k=seqlen,
+                                    nheads=nheads,
+                                    nheads_k=nheads_k,
+                                    headdim=headdim,
+                                    causal=causal,
+                                )
+                            )
+    for api in ("varlen", "varlen_qkvpacked", "varlen_kvpacked"):
+        for batch in PREFILL_AXES["batch"]:
+            for seqlen in PREFILL_AXES["seqlen"]:
+                total_tokens = batch * seqlen
+                for nheads, nheads_k in PREFILL_AXES["heads_q_kv"]:
+                    if api == "varlen_qkvpacked" and nheads != nheads_k:
+                        continue
+                    for headdim in PREFILL_AXES["head_dim"]:
+                        for causal in PREFILL_AXES["causal"]:
+                            for distribution in VARLEN_AXES["length_distribution"]:
+                                rows.append(
+                                    dict(
+                                        api=api,
+                                        name=(
+                                            f"{api}_b{batch}_s{seqlen}_h{nheads}_{nheads_k}"
+                                            f"_d{headdim}_{distribution}_{'causal' if causal else 'noncausal'}"
+                                        ),
+                                        batch=batch,
+                                        seqlen=seqlen,
+                                        total_tokens=total_tokens,
+                                        num_sequences=batch,
+                                        length_distribution=distribution,
+                                        nheads=nheads,
+                                        nheads_k=nheads_k,
+                                        headdim=headdim,
+                                        causal=causal,
+                                    )
+                                )
+    return rows
+
+
 def _select_shapes(matrix):
     if matrix == "default":
         return DEFAULT_SHAPES
     if matrix == "broad":
         return _broad_shapes()
     if matrix == "final-broad":
-        return _broad_shapes()
+        return _final_broad_shapes()
     if matrix == "exhaustive":
         return _prefill_exhaustive()
     raise ValueError(matrix)
@@ -303,6 +361,26 @@ def run_shape(shape, warmup, iters):
     return _run_dense(shape, warmup, iters)
 
 
+def _write_payload(path, matrix, warmup, iters, results, shard_index, num_shards, planned_rows, complete):
+    payload = {
+        "matrix": matrix,
+        "warmup": warmup,
+        "iters": iters,
+        "rows": results,
+        "axis_spec": {"prefill": PREFILL_AXES, "varlen": VARLEN_AXES},
+        "shard_index": shard_index,
+        "num_shards": num_shards,
+        "row_count": len(results),
+        "planned_row_count": planned_rows,
+        "complete": complete,
+    }
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp_path, path)
+    return payload
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
@@ -310,6 +388,8 @@ def main():
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--max-rows", type=int, default=0)
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--output", "--out", dest="output", default=f"sm75_attention_micro_{int(time.time())}.json")
     args = parser.parse_args()
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (7, 5):
@@ -317,19 +397,39 @@ def main():
     warmup = 2 if args.quick else args.warmup
     iters = 5 if args.quick else args.iters
     shapes = _select_shapes(args.matrix)
+    if args.num_shards < 1:
+        raise SystemExit("--num-shards must be >= 1")
+    if args.shard_index < 0 or args.shard_index >= args.num_shards:
+        raise SystemExit("--shard-index must be in [0, --num-shards)")
+    if args.num_shards > 1:
+        shapes = [shape for idx, shape in enumerate(shapes) if idx % args.num_shards == args.shard_index]
     if args.max_rows:
         shapes = shapes[: args.max_rows]
-    results = [run_shape(shape, warmup=warmup, iters=iters) for shape in shapes]
-    payload = {
-        "matrix": args.matrix,
-        "warmup": warmup,
-        "iters": iters,
-        "rows": results,
-        "axis_spec": {"prefill": PREFILL_AXES, "varlen": VARLEN_AXES},
-        "row_count": len(results),
-    }
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+    results = []
+    for shape in shapes:
+        results.append(run_shape(shape, warmup=warmup, iters=iters))
+        _write_payload(
+            args.output,
+            args.matrix,
+            warmup,
+            iters,
+            results,
+            args.shard_index,
+            args.num_shards,
+            len(shapes),
+            False,
+        )
+    payload = _write_payload(
+        args.output,
+        args.matrix,
+        warmup,
+        iters,
+        results,
+        args.shard_index,
+        args.num_shards,
+        len(shapes),
+        True,
+    )
     print(json.dumps(payload, indent=2))
 
 

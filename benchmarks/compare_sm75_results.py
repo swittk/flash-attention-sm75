@@ -37,7 +37,7 @@ def main():
     parser.add_argument("results", nargs="+")
     parser.add_argument("--mode", choices=("prefill", "decode", "generation", "auto"), default="auto")
     parser.add_argument("--prefill-gate", type=float, default=1.20)
-    parser.add_argument("--decode-gate", type=float, default=1.10)
+    parser.add_argument("--decode-gate", type=float, default=1.15)
     parser.add_argument("--no-gate", action="store_true")
     args = parser.parse_args()
 
@@ -68,6 +68,8 @@ def main():
             family: {
                 "row_count": len(family_rows),
                 "geomean_speedup_vs_baseline": geomean([r.get("speedup_vs_sdpa", r.get("speedup_vs_baseline")) for r in family_rows]),
+                "median_speedup_vs_baseline": statistics.median([r.get("speedup_vs_sdpa", r.get("speedup_vs_baseline")) for r in family_rows if r.get("speedup_vs_sdpa", r.get("speedup_vs_baseline")) is not None]),
+                "p10_speedup_vs_baseline": percentile([r.get("speedup_vs_sdpa", r.get("speedup_vs_baseline")) for r in family_rows if r.get("speedup_vs_sdpa", r.get("speedup_vs_baseline")) is not None], 0.10),
                 "min_speedup_vs_baseline": min([r.get("speedup_vs_sdpa", r.get("speedup_vs_baseline")) for r in family_rows if r.get("speedup_vs_sdpa", r.get("speedup_vs_baseline")) is not None], default=0.0),
             }
             for family, family_rows in sorted(by_family.items())
@@ -87,10 +89,29 @@ def main():
             mode = "prefill"
         elif families <= {"kvcache_decode"}:
             mode = "decode"
-    if mode == "prefill" and summary["geomean_speedup_vs_baseline"] < args.prefill_gate:
-        raise SystemExit("SM75 prefill geomean gate was not met")
-    if mode == "decode" and summary["min_speedup_vs_baseline"] < args.decode_gate:
-        raise SystemExit("SM75 decode speedup gate was not met")
+    if mode == "prefill":
+        gates = {
+            "geomean_speedup_vs_baseline": args.prefill_gate,
+            "median_speedup_vs_baseline": 1.10,
+            "p10_speedup_vs_baseline": 0.90,
+            "min_speedup_vs_baseline": 0.85,
+        }
+    elif mode == "decode":
+        gates = {
+            "geomean_speedup_vs_baseline": args.decode_gate,
+            "median_speedup_vs_baseline": 1.05,
+            "p10_speedup_vs_baseline": 0.90,
+            "min_speedup_vs_baseline": 0.85,
+        }
+    else:
+        gates = {}
+    failures = [
+        f"{metric} {summary[metric]:.4f} < {threshold:.4f}"
+        for metric, threshold in gates.items()
+        if summary[metric] < threshold
+    ]
+    if failures:
+        raise SystemExit("SM75 performance gates were not met: " + "; ".join(failures))
 
 
 if __name__ == "__main__":

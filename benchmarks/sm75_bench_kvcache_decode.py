@@ -24,6 +24,7 @@ DECODE_AXES = {
     "cache_layout": ["contiguous", "paged"],
     "rotary": [False, True],
     "cache_batch_idx": [False, True],
+    "cache_leftpad": [False, True],
 }
 
 
@@ -112,10 +113,14 @@ def _make_case_tensors(case, device):
     v_new = torch.randn_like(k_new)
     cache_seqlens = torch.full((batch,), cache_len, device=device, dtype=torch.int32)
     cache_batch_idx = None
+    cache_leftpad = None
     cache_rows = batch
     if case["cache_batch_idx"]:
         cache_rows = batch + 2
         cache_batch_idx = torch.arange(batch, device=device, dtype=torch.int32).flip(0)
+    if case.get("cache_leftpad", False):
+        max_leftpad = max(1, min(128, cache_len // 16))
+        cache_leftpad = (torch.arange(batch, device=device, dtype=torch.int32) % max_leftpad) + 1
 
     block_table = None
     if case["cache_layout"] == "paged":
@@ -140,10 +145,10 @@ def _make_case_tensors(case, device):
         rotary_cos = torch.cos(freqs).to(torch.float16)
         rotary_sin = torch.sin(freqs).to(torch.float16)
 
-    return q, k_cache, v_cache, k_new, v_new, cache_seqlens, cache_batch_idx, block_table, rotary_cos, rotary_sin
+    return q, k_cache, v_cache, k_new, v_new, cache_seqlens, cache_batch_idx, cache_leftpad, block_table, rotary_cos, rotary_sin
 
 
-def _baseline(case, q, k_cache, v_cache, k_new, v_new, cache_seqlens, cache_batch_idx, block_table, rotary_cos, rotary_sin):
+def _baseline(case, q, k_cache, v_cache, k_new, v_new, cache_seqlens, cache_batch_idx, cache_leftpad, block_table, rotary_cos, rotary_sin):
     batch, q_len = q.shape[0], q.shape[1]
     cache_len = int(cache_seqlens[0].item())
     if block_table is None:
@@ -161,12 +166,37 @@ def _baseline(case, q, k_cache, v_cache, k_new, v_new, cache_seqlens, cache_batc
         k_update = _rotate(k_new, rotary_cos, rotary_sin, offsets, interleaved=False)
     dense_k = torch.cat((dense_k, k_update), dim=1)
     dense_v = torch.cat((dense_v, v_new), dim=1)
-    return _sdpa_decode(q_attn, dense_k, dense_v, causal=True)
+    if cache_leftpad is None or bool(torch.all(cache_leftpad == 0)):
+        return _sdpa_decode(q_attn, dense_k, dense_v, causal=True)
+    outs = []
+    end = cache_len + q_len
+    for batch_idx, leftpad in enumerate(cache_leftpad.tolist()):
+        outs.append(
+            _sdpa_decode(
+                q_attn[batch_idx : batch_idx + 1],
+                dense_k[batch_idx : batch_idx + 1, leftpad:end],
+                dense_v[batch_idx : batch_idx + 1, leftpad:end],
+                causal=True,
+            )
+        )
+    return torch.cat(outs, dim=0)
 
 
 def run_case(case, warmup, iters):
     device = torch.device("cuda")
-    q, k_cache, v_cache, k_new, v_new, cache_seqlens, cache_batch_idx, block_table, rotary_cos, rotary_sin = _make_case_tensors(case, device)
+    (
+        q,
+        k_cache,
+        v_cache,
+        k_new,
+        v_new,
+        cache_seqlens,
+        cache_batch_idx,
+        cache_leftpad,
+        block_table,
+        rotary_cos,
+        rotary_sin,
+    ) = _make_case_tensors(case, device)
     # Benchmark update+decode on cloned caches so the measured function is repeatable.
     def native_fn():
         return flash_attn_with_kvcache(
@@ -177,6 +207,7 @@ def run_case(case, warmup, iters):
             v=v_new,
             cache_seqlens=cache_seqlens,
             cache_batch_idx=cache_batch_idx,
+            cache_leftpad=cache_leftpad,
             block_table=block_table,
             rotary_cos=rotary_cos,
             rotary_sin=rotary_sin,
@@ -185,7 +216,7 @@ def run_case(case, warmup, iters):
         )
 
     def baseline_fn():
-        return _baseline(case, q, k_cache, v_cache, k_new, v_new, cache_seqlens, cache_batch_idx, block_table, rotary_cos, rotary_sin)
+        return _baseline(case, q, k_cache, v_cache, k_new, v_new, cache_seqlens, cache_batch_idx, cache_leftpad, block_table, rotary_cos, rotary_sin)
 
     native_out = native_fn()
     torch.cuda.synchronize()
@@ -207,6 +238,7 @@ def run_case(case, warmup, iters):
         "headdim": case["headdim"],
         "rotary": case["rotary"],
         "cache_batch_idx": case["cache_batch_idx"],
+        "cache_leftpad": case.get("cache_leftpad", False),
         "native_ms": native_ms,
         "baseline": "torch.scaled_dot_product_attention",
         "baseline_ms": baseline_ms,
@@ -234,6 +266,7 @@ def _default_cases(cache_len, q_len):
             cache_layout="contiguous",
             rotary=False,
             cache_batch_idx=False,
+            cache_leftpad=False,
         )
     ]
 
@@ -254,11 +287,45 @@ def _broad_cases():
                 cache_layout=DECODE_AXES["cache_layout"][idx % len(DECODE_AXES["cache_layout"])],
                 rotary=DECODE_AXES["rotary"][idx % len(DECODE_AXES["rotary"])],
                 cache_batch_idx=DECODE_AXES["cache_batch_idx"][(idx // 2) % len(DECODE_AXES["cache_batch_idx"])],
+                cache_leftpad=DECODE_AXES["cache_leftpad"][(idx // 3) % len(DECODE_AXES["cache_leftpad"])],
             )
         )
     for q_len in DECODE_AXES["q_len"]:
-        rows.append(dict(name=f"decode_q{q_len}_paged_rotary", batch=2, q_len=q_len, cache_len=2048, nheads=32, nheads_k=8, headdim=128, cache_layout="paged", rotary=True, cache_batch_idx=False))
-    rows.append(dict(name="decode_batch16_contiguous", batch=16, q_len=1, cache_len=4096, nheads=16, nheads_k=1, headdim=64, cache_layout="contiguous", rotary=False, cache_batch_idx=True))
+        rows.append(dict(name=f"decode_q{q_len}_paged_rotary", batch=2, q_len=q_len, cache_len=2048, nheads=32, nheads_k=8, headdim=128, cache_layout="paged", rotary=True, cache_batch_idx=False, cache_leftpad=False))
+    rows.append(dict(name="decode_batch16_contiguous", batch=16, q_len=1, cache_len=4096, nheads=16, nheads_k=1, headdim=64, cache_layout="contiguous", rotary=False, cache_batch_idx=True, cache_leftpad=True))
+    return rows
+
+
+def _final_broad_cases():
+    rows = []
+    for batch in DECODE_AXES["batch"]:
+        for q_len in DECODE_AXES["q_len"]:
+            for cache_len in DECODE_AXES["cache_len"]:
+                for nheads, nheads_k in DECODE_AXES["heads_q_kv"]:
+                    for headdim in DECODE_AXES["head_dim"]:
+                        for cache_layout in DECODE_AXES["cache_layout"]:
+                            for rotary in DECODE_AXES["rotary"]:
+                                for cache_batch_idx in DECODE_AXES["cache_batch_idx"]:
+                                    for cache_leftpad in DECODE_AXES["cache_leftpad"]:
+                                        rows.append(
+                                            dict(
+                                                name=(
+                                                    f"decode_b{batch}_q{q_len}_c{cache_len}_h{nheads}_{nheads_k}"
+                                                    f"_d{headdim}_{cache_layout}_rot{int(rotary)}"
+                                                    f"_idx{int(cache_batch_idx)}_left{int(cache_leftpad)}"
+                                                ),
+                                                batch=batch,
+                                                q_len=q_len,
+                                                cache_len=cache_len,
+                                                nheads=nheads,
+                                                nheads_k=nheads_k,
+                                                headdim=headdim,
+                                                cache_layout=cache_layout,
+                                                rotary=rotary,
+                                                cache_batch_idx=cache_batch_idx,
+                                                cache_leftpad=cache_leftpad,
+                                            )
+                                        )
     return rows
 
 
@@ -272,8 +339,29 @@ def _exhaustive_cases():
                         for cache_layout in DECODE_AXES["cache_layout"]:
                             for rotary in DECODE_AXES["rotary"]:
                                 for cache_batch_idx in DECODE_AXES["cache_batch_idx"]:
-                                    rows.append(dict(name=f"decode_b{batch}_q{q_len}_c{cache_len}_h{nheads}_{nheads_k}_d{headdim}_{cache_layout}_rot{int(rotary)}_idx{int(cache_batch_idx)}", batch=batch, q_len=q_len, cache_len=cache_len, nheads=nheads, nheads_k=nheads_k, headdim=headdim, cache_layout=cache_layout, rotary=rotary, cache_batch_idx=cache_batch_idx))
+                                    for cache_leftpad in DECODE_AXES["cache_leftpad"]:
+                                        rows.append(dict(name=f"decode_b{batch}_q{q_len}_c{cache_len}_h{nheads}_{nheads_k}_d{headdim}_{cache_layout}_rot{int(rotary)}_idx{int(cache_batch_idx)}_left{int(cache_leftpad)}", batch=batch, q_len=q_len, cache_len=cache_len, nheads=nheads, nheads_k=nheads_k, headdim=headdim, cache_layout=cache_layout, rotary=rotary, cache_batch_idx=cache_batch_idx, cache_leftpad=cache_leftpad))
     return rows
+
+
+def _write_payload(path, matrix, warmup, iters, rows, shard_index, num_shards, planned_rows, complete):
+    payload = {
+        "matrix": matrix,
+        "warmup": warmup,
+        "iters": iters,
+        "rows": rows,
+        "axis_spec": {"decode": DECODE_AXES},
+        "shard_index": shard_index,
+        "num_shards": num_shards,
+        "row_count": len(rows),
+        "planned_row_count": planned_rows,
+        "complete": complete,
+    }
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp_path, path)
+    return payload
 
 
 def main():
@@ -284,29 +372,53 @@ def main():
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--matrix", choices=("default", "broad", "final-broad", "exhaustive"), default="default")
     parser.add_argument("--max-rows", type=int, default=0)
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--output", "--out", dest="output", default=f"sm75_kvcache_decode_{int(time.time())}.json")
     args = parser.parse_args()
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (7, 5):
         raise SystemExit("SM75 CUDA device is required")
     if args.matrix == "default":
         cases = _default_cases(args.cache_len, args.q_len)
-    elif args.matrix in ("broad", "final-broad"):
+    elif args.matrix == "broad":
         cases = _broad_cases()
+    elif args.matrix == "final-broad":
+        cases = _final_broad_cases()
     else:
         cases = _exhaustive_cases()
+    if args.num_shards < 1:
+        raise SystemExit("--num-shards must be >= 1")
+    if args.shard_index < 0 or args.shard_index >= args.num_shards:
+        raise SystemExit("--shard-index must be in [0, --num-shards)")
+    if args.num_shards > 1:
+        cases = [case for idx, case in enumerate(cases) if idx % args.num_shards == args.shard_index]
     if args.max_rows:
         cases = cases[: args.max_rows]
-    rows = [run_case(case, args.warmup, args.iters) for case in cases]
-    payload = {
-        "matrix": args.matrix,
-        "warmup": args.warmup,
-        "iters": args.iters,
-        "rows": rows,
-        "axis_spec": {"decode": DECODE_AXES},
-        "row_count": len(rows),
-    }
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+    rows = []
+    for case in cases:
+        rows.append(run_case(case, args.warmup, args.iters))
+        _write_payload(
+            args.output,
+            args.matrix,
+            args.warmup,
+            args.iters,
+            rows,
+            args.shard_index,
+            args.num_shards,
+            len(cases),
+            False,
+        )
+    payload = _write_payload(
+        args.output,
+        args.matrix,
+        args.warmup,
+        args.iters,
+        rows,
+        args.shard_index,
+        args.num_shards,
+        len(cases),
+        True,
+    )
     print(json.dumps(payload, indent=2))
 
 
