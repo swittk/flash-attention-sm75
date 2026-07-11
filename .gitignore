@@ -19,6 +19,7 @@ bin/
 build/
 develop-eggs/
 dist/
+dist-sm75*/
 eggs/
 lib/
 lib64/
