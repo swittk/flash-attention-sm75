@@ -59,9 +59,12 @@ def reset_last_backend() -> None:
 
 def _set_last_backend(value: str) -> None:
     global _LAST_BACKEND
+    if getattr(_STATE, "last_backend", None) == value and _LAST_BACKEND == value:
+        return
     _STATE.last_backend = value
     with _STATE_LOCK:
-        _LAST_BACKEND = value
+        if _LAST_BACKEND != value:
+            _LAST_BACKEND = value
 
 
 def _is_sm75_tensor(x: torch.Tensor) -> bool:
@@ -629,6 +632,62 @@ def try_forward(
         f"{'_local' if window_size_left != -1 or window_size_right != -1 else ''}"
     )
     return out, softmax_lse, s_dmask, rng_state
+
+
+def try_forward_direct_no_grad(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dropout_p: float,
+    softmax_scale: float,
+    causal: bool,
+    window_size_left: int,
+    window_size_right: int,
+    softcap: float,
+    alibi_slopes: Optional[torch.Tensor],
+    return_softmax: bool,
+) -> Optional[torch.Tensor]:
+    """Minimal inference dispatch for exact-dimension dense kernels."""
+    if (
+        _sm75_cuda is None
+        or dropout_p != 0.0
+        or window_size_left != -1
+        or window_size_right != -1
+        or softcap != 0.0
+        or alibi_slopes is not None
+        or return_softmax
+        or q.dtype != torch.float16
+        or k.dtype != torch.float16
+        or v.dtype != torch.float16
+        or q.dim() != 4
+        or k.dim() != 4
+        or v.dim() != 4
+        or q.shape[-1] not in (64, 128, 192)
+        or q.shape[-1] != k.shape[-1]
+        or q.shape[-1] != v.shape[-1]
+        or q.shape[0] != k.shape[0]
+        or q.shape[0] != v.shape[0]
+        or k.shape[1] != v.shape[1]
+        or k.shape[2] != v.shape[2]
+        or q.shape[-2] % k.shape[-2] != 0
+        or q.stride(-1) != 1
+        or k.stride(-1) != 1
+        or v.stride(-1) != 1
+        or q.device != k.device
+        or q.device != v.device
+        or not _is_sm75_tensor(q)
+    ):
+        return None
+    out, _ = _sm75_cuda.fwd(q, k, v, float(softmax_scale), bool(causal))
+    mask = "causal" if causal else "noncausal"
+    if q.shape[-1] == 192:
+        backend_kind = "dense_hd192_tiled_kernel192"
+    else:
+        backend_kind = f"fwd_hd{q.shape[-1]}_kernel{q.shape[-1]}"
+    _set_last_backend(
+        f"sm75_native_{backend_kind}_{mask}_{_head_group_suffix(q, k)}_{_dtype_suffix(q.dtype)}"
+    )
+    return out
 
 
 def try_packed_forward(

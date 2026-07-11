@@ -1380,6 +1380,21 @@ def flash_attn_func(
     if not any(x.requires_grad for x in (q, k, v)):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
+        sm75_direct = _sm75_native.try_forward_direct_no_grad(
+            q,
+            k,
+            v,
+            dropout_p,
+            softmax_scale,
+            causal,
+            window_size[0],
+            window_size[1],
+            softcap,
+            alibi_slopes,
+            return_attn_probs,
+        )
+        if sm75_direct is not None:
+            return sm75_direct
         sm75_result = _sm75_native.try_forward(
             maybe_contiguous(q),
             maybe_contiguous(k),
