@@ -1,4 +1,6 @@
 *.ncu-rep
+*.nsys-rep
+*.qdrep
 *.sass
 *.ptx
 *.cubin
@@ -20,6 +22,7 @@ build/
 develop-eggs/
 dist/
 dist-sm75*/
+pip-wheel-metadata/
 eggs/
 lib/
 lib64/
@@ -39,6 +42,12 @@ var/
 venv
 agent_space/
 benchmarks/results/
+.cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+evidence-sm75/
+evidence-sm75.zip
 
 # compile-time generated file
 flash_attn_config.py
