@@ -8,6 +8,10 @@ import time
 
 import torch
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 
 def _load_model(model_id, attn_implementation):
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -68,6 +72,15 @@ def _backend():
         return f"backend_unavailable:{exc}"
 
 
+def _flash_attn_import_path():
+    try:
+        import flash_attn
+
+        return getattr(flash_attn, "__file__", "")
+    except Exception as exc:  # pragma: no cover - diagnostic only
+        return f"import_path_unavailable:{exc}"
+
+
 def _run_variant(model_id, prompt_len, new_tokens, attn_impl, warmup):
     tok, model = _load_model(model_id, attn_impl)
     inputs = _prompt(tok, prompt_len)
@@ -90,6 +103,7 @@ def _run_variant(model_id, prompt_len, new_tokens, attn_impl, warmup):
         "total_tokens_per_s": (prompt_len + new_tokens) / max(1e-9, total_s),
         "peak_vram_mb": peak,
         "backend": backend,
+        "flash_attn_import_path": _flash_attn_import_path() if attn_impl == "flash_attention_2" else None,
         "sample_text": decoded,
     }
 
@@ -182,6 +196,8 @@ def _run_case_subprocess(model_id, prompt_len, new_tokens, warmup, out_path, idx
         "--no-isolate-cases",
     ]
     env = os.environ.copy()
+    pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = REPO_ROOT if not pythonpath else f"{REPO_ROOT}{os.pathsep}{pythonpath}"
     proc = subprocess.run(cmd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.stdout:
         print(proc.stdout, end="", flush=True)
