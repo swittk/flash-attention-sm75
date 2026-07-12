@@ -1280,7 +1280,7 @@ def flash_attn_kvpacked_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
-    if not any(x.requires_grad for x in (q, kv)):
+    if not (q.requires_grad or kv.requires_grad):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
         k, v = kv[:, :, 0], kv[:, :, 1]
@@ -1377,7 +1377,7 @@ def flash_attn_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
-    if not any(x.requires_grad for x in (q, k, v)):
+    if not (q.requires_grad or k.requires_grad or v.requires_grad):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
         sm75_direct = _sm75_native.try_forward_direct_no_grad(

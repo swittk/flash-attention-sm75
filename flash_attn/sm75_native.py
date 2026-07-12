@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 import threading
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 
@@ -24,6 +24,8 @@ _SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
 _STATE = threading.local()
 _STATE_LOCK = threading.Lock()
 _LAST_BACKEND: Optional[str] = None
+_SM75_DEVICE_CACHE: Dict[int, bool] = {}
+_DIRECT_FWD_BACKEND_CACHE: Dict[Tuple[int, bool, bool], str] = {}
 
 
 def _env_true(name: str) -> bool:
@@ -70,7 +72,12 @@ def _set_last_backend(value: str) -> None:
 def _is_sm75_tensor(x: torch.Tensor) -> bool:
     if not x.is_cuda:
         return False
-    return torch.cuda.get_device_capability(x.device) == (7, 5)
+    device_idx = x.get_device()
+    cached = _SM75_DEVICE_CACHE.get(device_idx)
+    if cached is None:
+        cached = torch.cuda.get_device_capability(device_idx) == (7, 5)
+        _SM75_DEVICE_CACHE[device_idx] = cached
+    return cached
 
 
 def is_sm75_call(q: torch.Tensor) -> bool:
@@ -83,6 +90,23 @@ def _dtype_suffix(dtype: torch.dtype) -> str:
 
 def _head_group_suffix(q: torch.Tensor, k: torch.Tensor) -> str:
     return "gqa" if q.shape[-2] != k.shape[-2] else "mha"
+
+
+def _direct_fwd_backend(head_dim: int, causal: bool, is_gqa: bool) -> str:
+    key = (head_dim, causal, is_gqa)
+    cached = _DIRECT_FWD_BACKEND_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if head_dim == 192:
+        backend_kind = "dense_hd192_tiled_kernel192"
+    else:
+        backend_kind = f"fwd_hd{head_dim}_kernel{head_dim}"
+    cached = (
+        f"sm75_native_{backend_kind}_{'causal' if causal else 'noncausal'}_"
+        f"{'gqa' if is_gqa else 'mha'}_fp16"
+    )
+    _DIRECT_FWD_BACKEND_CACHE[key] = cached
+    return cached
 
 
 def _kernel_head_dim(head_dim: int) -> Optional[int]:
@@ -656,20 +680,24 @@ def try_forward_direct_no_grad(
         or softcap != 0.0
         or alibi_slopes is not None
         or return_softmax
-        or q.dtype != torch.float16
-        or k.dtype != torch.float16
-        or v.dtype != torch.float16
-        or q.dim() != 4
-        or k.dim() != 4
-        or v.dim() != 4
-        or q.shape[-1] not in (64, 128, 192)
-        or q.shape[-1] != k.shape[-1]
-        or q.shape[-1] != v.shape[-1]
-        or q.shape[0] != k.shape[0]
-        or q.shape[0] != v.shape[0]
-        or k.shape[1] != v.shape[1]
-        or k.shape[2] != v.shape[2]
-        or q.shape[-2] % k.shape[-2] != 0
+    ):
+        return None
+    if q.dtype != torch.float16 or k.dtype != torch.float16 or v.dtype != torch.float16:
+        return None
+    if q.dim() != 4 or k.dim() != 4 or v.dim() != 4:
+        return None
+    batch, _, q_heads, head_dim = q.shape
+    k_batch, k_seqlen, kv_heads, k_head_dim = k.shape
+    v_batch, v_seqlen, v_heads, v_head_dim = v.shape
+    if (
+        head_dim not in (64, 128, 192)
+        or head_dim != k_head_dim
+        or head_dim != v_head_dim
+        or batch != k_batch
+        or batch != v_batch
+        or k_seqlen != v_seqlen
+        or kv_heads != v_heads
+        or q_heads % kv_heads != 0
         or q.stride(-1) != 1
         or k.stride(-1) != 1
         or v.stride(-1) != 1
@@ -679,14 +707,7 @@ def try_forward_direct_no_grad(
     ):
         return None
     out, _ = _sm75_cuda.fwd(q, k, v, float(softmax_scale), bool(causal))
-    mask = "causal" if causal else "noncausal"
-    if q.shape[-1] == 192:
-        backend_kind = "dense_hd192_tiled_kernel192"
-    else:
-        backend_kind = f"fwd_hd{q.shape[-1]}_kernel{q.shape[-1]}"
-    _set_last_backend(
-        f"sm75_native_{backend_kind}_{mask}_{_head_group_suffix(q, k)}_{_dtype_suffix(q.dtype)}"
-    )
+    _set_last_backend(_direct_fwd_backend(head_dim, bool(causal), q_heads != kv_heads))
     return out
 
 

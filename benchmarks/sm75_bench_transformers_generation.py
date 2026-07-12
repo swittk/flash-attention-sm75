@@ -81,6 +81,13 @@ def _flash_attn_import_path():
         return f"import_path_unavailable:{exc}"
 
 
+def _decode_tokens_per_s(new_tokens, total_s, prefill_s):
+    decode_s = total_s - prefill_s
+    if decode_s <= 0:
+        return decode_s, None, False
+    return decode_s, new_tokens / decode_s, True
+
+
 def _run_variant(model_id, prompt_len, new_tokens, attn_impl, warmup):
     tok, model = _load_model(model_id, attn_impl)
     inputs = _prompt(tok, prompt_len)
@@ -88,6 +95,7 @@ def _run_variant(model_id, prompt_len, new_tokens, attn_impl, warmup):
         _generate_once(model, inputs, min(4, new_tokens))
     prefill_s = _prefill_once(model, inputs)
     out, total_s, peak = _generate_once(model, inputs, new_tokens)
+    decode_s, decode_tps, decode_valid = _decode_tokens_per_s(new_tokens, total_s, prefill_s)
     decoded = tok.decode(out[0, -min(new_tokens, out.shape[1]) :], skip_special_tokens=True)
     backend = _backend() if attn_impl == "flash_attention_2" else "transformers_sdpa"
     del model, tok, inputs, out
@@ -99,7 +107,9 @@ def _run_variant(model_id, prompt_len, new_tokens, attn_impl, warmup):
         "prefill_s": prefill_s,
         "total_s": total_s,
         "time_to_first_token_s": prefill_s,
-        "decode_tokens_per_s": new_tokens / max(1e-9, total_s - prefill_s),
+        "decode_time_s": decode_s,
+        "decode_time_valid": decode_valid,
+        "decode_tokens_per_s": decode_tps,
         "total_tokens_per_s": (prompt_len + new_tokens) / max(1e-9, total_s),
         "peak_vram_mb": peak,
         "backend": backend,
@@ -145,6 +155,9 @@ def run_case(model_id, prompt_len, new_tokens, warmup):
             "error_type": type(exc).__name__,
             "error": str(exc),
         }
+    decode_speedup = None
+    if sdpa["decode_tokens_per_s"] is not None and fa2["decode_tokens_per_s"] is not None:
+        decode_speedup = fa2["decode_tokens_per_s"] / sdpa["decode_tokens_per_s"]
     return {
         "name": name,
         "family": "transformers_generation",
@@ -157,7 +170,7 @@ def run_case(model_id, prompt_len, new_tokens, warmup):
         "flash_attention_2": fa2,
         "backend": fa2["backend"],
         "speedup_vs_baseline": sdpa["total_s"] / fa2["total_s"],
-        "decode_speedup_vs_baseline": fa2["decode_tokens_per_s"] / max(1e-9, sdpa["decode_tokens_per_s"]),
+        "decode_speedup_vs_baseline": decode_speedup,
         "peak_vram_native_mb": fa2["peak_vram_mb"],
         "peak_vram_baseline_mb": sdpa["peak_vram_mb"],
         "fallback_attempted": not str(fa2["backend"]).startswith("sm75_native"),
