@@ -1,633 +1,157 @@
-# FlashAttention
-This repository provides the official implementation of FlashAttention and
-FlashAttention-2 from the
-following papers.
+# FlashAttention for NVIDIA Turing (SM75)
 
-**FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness**  
-Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, Christopher Ré  
-Paper: https://arxiv.org/abs/2205.14135  
-IEEE Spectrum [article](https://spectrum.ieee.org/mlperf-rankings-2022) about our submission to the MLPerf 2.0 benchmark using FlashAttention.
-![FlashAttention](assets/flashattn_banner.jpg)
+This is an unofficial experimental fork of
+[Dao-AILab FlashAttention](https://github.com/Dao-AILab/flash-attention). It
+adds native CUDA attention kernels for NVIDIA Turing GPUs with compute
+capability 7.5 while keeping the `flash-attn` distribution name and
+`flash_attn` Python imports for compatibility.
 
-**FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning**  
-Tri Dao
+The fork has been tested primarily on an RTX 2080 Ti. Other SM75 GPUs,
+including the T4, still need independent testing. This project is not
+affiliated with or endorsed by Dao-AILab or NVIDIA.
 
-Paper: https://tridao.me/publications/flash2/flash2.pdf
+## What This Fork Is
 
-![FlashAttention-2](assets/flashattention_logo.png)
+The first release is an experimental, inference-first SM75 backend compatible
+with the FlashAttention 2 public Python API. Supported SM75 calls run through
+CUDA code in this repository. They do not silently fall back to PyTorch SDPA or
+xFormers.
 
+For Ampere, Ada, Hopper, Blackwell, ROCm, FA3, FA4, and upstream training
+documentation, use the
+[upstream FlashAttention project](https://github.com/Dao-AILab/flash-attention).
 
-## Usage
+## Supported And Tested Hardware
 
-We've been very happy to see FlashAttention being widely adopted in such a short
-time after its release. This [page](https://github.com/Dao-AILab/flash-attention/blob/main/usage.md)
-contains a partial list of places where FlashAttention is being used.
+- Primary test GPU: RTX 2080 Ti, compute capability 7.5.
+- Target GPU architecture: NVIDIA Turing, SM75.
+- Current build environment: CUDA 12.x.
+- Native compute dtype: FP16.
+- BF16 compatibility: inputs are converted to FP16 for computation and outputs
+  are converted back to BF16.
+- Supported head dimensions: `32, 64, 80, 96, 112, 128, 160, 192, 224, 256`.
 
-FlashAttention and FlashAttention-2 are free to use and modify (see LICENSE).
-Please cite and credit FlashAttention if you use it.
+The PyTorch and CUDA versions used to build the wheel must match the runtime
+environment. Support for a head dimension does not imply support for every
+upstream option at that dimension.
 
+## Installation
 
-## FlashAttention-3 beta release
-FlashAttention-3 is optimized for Hopper GPUs (e.g. H100). 
+Install the build dependency first, then build from this checkout without
+allowing pip to replace the installed PyTorch build:
 
-Blogpost: https://tridao.me/blog/2024/flash3/
-
-Paper: https://tridao.me/publications/flash3/flash3.pdf
-
-![FlashAttention-3 speedup on H100 80GB SXM5 with FP16](assets/flash3_fp16_fwd.png)
-
-This is a beta release for testing / benchmarking before we integrate that with
-the rest of the repo.
-
-Currently released:
-- FP16 / BF16 forward and backward, FP8 forward
-
-Requirements: H100 / H800 GPU, CUDA >= 12.3.
-
-We highly recommend CUDA 12.8 for best performance.
-
-To install:
-```sh
-cd hopper
-python setup.py install
-```
-To run the test:
-```sh
-export PYTHONPATH=$PWD
-pytest -q -s test_flash_attn.py
-```
-Once the package is installed, you can import it as follows:
-```python
-from flash_attn_3 import flash_attn_interface
-flash_attn_interface.flash_attn_func()
-```
-
-To install using `uv`, in your `pyproject.toml`:
-
-```toml
-[project]
-dependencies = [
-    "flash-attn-3"
-]
-
-[tool.uv]
-no-build-isolation = true
-
-[tool.uv.sources]
-flash-attn-3 = { git = "https://github.com/Dao-AILab/flash-attention", subdirectory = "hopper" }
-```
-
-## FlashAttention-4 (CuTeDSL)
-
-FlashAttention-4 is written in CuTeDSL and optimized for Hopper and Blackwell GPUs (e.g. H100, B200).
-
-To install:
-```sh
-pip install flash-attn-4
-```
-
-If you're on CUDA 13, we recommend installing with the `cu13` extra for best performance:
-```sh
-pip install "flash-attn-4[cu13]"
-```
-
-Once installed, you can use it as follows:
-```python
-from flash_attn.cute import flash_attn_func
-
-out = flash_attn_func(q, k, v, causal=True)
-```
-
-## Installation and features
-**Requirements:**
-- CUDA toolkit or ROCm toolkit
-- PyTorch 2.2 and above.
-- `packaging` Python package (`pip install packaging`)
-- `psutil` Python package (`pip install psutil`)
-- `ninja` Python package (`pip install ninja`) *
-- Linux. Might work for Windows starting v2.3.2 (we've seen a few positive [reports](https://github.com/Dao-AILab/flash-attention/issues/595)) but Windows compilation still requires more testing. If you have ideas on how to set up prebuilt CUDA wheels for Windows, please reach out via Github issue.
-
-\* Make sure that `ninja` is installed and that it works correctly (e.g. `ninja
---version` then `echo $?` should return exit code 0). If not (sometimes `ninja
---version` then `echo $?` returns a nonzero exit code), uninstall then reinstall
-`ninja` (`pip uninstall -y ninja && pip install ninja`). Without `ninja`,
-compiling can take a very long time (2h) since it does not use multiple CPU
-cores. With `ninja` compiling takes 3-5 minutes on a 64-core machine using CUDA toolkit.
-
-**To install:**
-```sh
-pip install flash-attn --no-build-isolation
-```
-Alternatively you can compile from source:
-```sh
-python setup.py install
-```
-
-If your machine has less than 96GB of RAM and lots of CPU cores, `ninja` might
-run too many parallel compilation jobs that could exhaust the amount of RAM. To
-limit the number of parallel compilation jobs, you can set the environment
-variable `MAX_JOBS`:
-```sh
-MAX_JOBS=4 pip install flash-attn --no-build-isolation
-```
-
-**Interface:** `src/flash_attention_interface.py`
-
-### NVIDIA CUDA Support
-**Requirements:**
-- CUDA 12.0 and above.
-
-We recommend the
-[Pytorch](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch)
-container from Nvidia, which has all the required tools to install FlashAttention.
-
-FlashAttention-2 with CUDA currently supports:
-1. Ampere, Ada, or Hopper GPUs (e.g., A100, RTX 3090, RTX 4090, H100). This fork also includes an in-tree native SM75/Turing backend for RTX 2080 Ti / T4 class GPUs.
-2. Datatype fp16 and bf16. Upstream native BF16 CUDA compute targets Ampere, Ada, or Hopper; this fork handles BF16 user inputs on SM75 through an explicit FP16 compute policy.
-3. All head dimensions up to 256. ~~Head dim > 192 backward requires A100/A800 or H100/H800~~. Head dim 256 backward now works on consumer GPUs (if there's no dropout) as of flash-attn 2.5.5.
-
-### Native SM75 / Turing backend in this fork
-This fork keeps the package name `flash-attn` and import package `flash_attn`, while adding a self-contained CUDA SM75 extension named `flash_attn_sm75_cuda`. It is intended for NVIDIA Turing GPUs such as RTX 2080 Ti on CUDA 12.x.
-
-Install from this repository:
-```sh
-pip install --no-deps -e . --no-build-isolation
-```
-
-For a faster development build that compiles only the SM75 extension:
-```sh
-FLASH_ATTN_FORCE_BUILD=TRUE FLASH_ATTN_BUILD_SM75_ONLY=TRUE pip install --no-deps -e . --no-build-isolation
-```
-
-Wheel build/install for this fork must preserve the PyTorch CUDA ABI already installed in the target environment:
 ```sh
 python3 -m pip install einops
-FLASH_ATTN_FORCE_BUILD=TRUE FLASH_ATTN_BUILD_SM75_ONLY=TRUE python3 -m pip wheel . --no-build-isolation --no-deps -w dist-sm75
+python3 -m pip install --no-deps --no-build-isolation .
+```
+
+To build and install a wheel:
+
+```sh
+python3 -m pip install einops
+FLASH_ATTN_BUILD_SM75_ONLY=TRUE python3 -m pip wheel . --no-build-isolation --no-deps -w dist-sm75
 python3 -m pip install --force-reinstall --no-deps dist-sm75/flash_attn*.whl
 ```
 
-Do not install this fork with dependency resolution unless you intentionally want pip to manage PyTorch. The extension is compiled against the active `torch` headers/libraries, and replacing torch after wheel build can create undefined-symbol ABI failures. If you use `--no-deps`, install runtime dependencies such as `einops` yourself; `flash_attn.bert_padding` imports it.
+Wheel builds from this repository always compile the checked-out source. This
+fork does not download cached Dao-AILab release wheels.
 
-Native-only test mode disables runtime fallbacks and requires every served call to report an `sm75_native...` backend:
+## Verify The SM75 Backend
+
+```python
+import flash_attn
+import flash_attn_sm75_cuda
+from flash_attn import flash_attn_func, get_last_flash_attn_backend
+
+# Run a supported SM75 CUDA call before checking the backend.
+print(flash_attn.__version__)
+print(get_last_flash_attn_backend())
+```
+
+The backend string for a successful SM75 call starts with `sm75_native`.
+Native-only test mode turns any unsupported route into an error:
+
 ```sh
 FLASH_ATTN_SM75_NATIVE_ONLY=1 FLASH_ATTN_SM75_BAN_FALLBACKS=1 pytest -q tests/test_sm75_*.py
 ```
 
-Implemented SM75-native paths in this fork:
-- Specialized FP16 CuTe/CUTLASS SM75 kernels for dense and varlen forward/backward at head dimensions 64 and 128, causal and non-causal, MHA/GQA/MQA.
-- Generic FP16 CUDA forward/backward kernels for dense head dimensions 32, 64, 80, 96, 112, 128, 160, 192, 224, and 256, including local/sliding-window masks, dropout, softcap, ALiBI, and explicit `return_attn_probs`.
-- Public API dispatch for `flash_attn_func`, packed QKV/KV APIs, varlen APIs, and `flash_attn_with_kvcache`.
-- Generic varlen dispatch for the same head-dim set via per-sequence native SM75 CUDA launches, including local/sliding-window masks, dropout, softcap, ALiBI, `return_attn_probs`, zero-length query sequences, `leftpad_k`, `seqused_k`, and paged `block_table` forward packing.
-- KV-cache paths for q_len=1 decode, q_len>1 chunked decode, in-place cache update, `cache_seqlens`, `cache_batch_idx`, `cache_leftpad`, rotary embeddings, contiguous cache, and block-table paged cache packing.
-- BF16 inputs on SM75 are explicitly converted to FP16 for native compute; no CUDA BF16 tensor-core kernels are used for SM75.
+## Compatibility
 
-Validation targets:
+| Area | SM75 status |
+| --- | --- |
+| Dense attention | Native FP16 CUDA paths for the listed head dimensions. |
+| Packed QKV and KV | Native routes; some use strided Q/K/V views into the dense kernels. |
+| Variable length | Native routes; some modes repack data into native variable-length buffers. |
+| KV cache | Native contiguous and paged cache routes, cache update, rotary, `cache_batch_idx`, and `cache_leftpad`. |
+| BF16 | Compatibility conversion to FP16 compute, then conversion back to BF16. |
+| Dropout | Not supported on SM75 in this release. `dropout_p > 0` raises an error. |
+| Backward | Tested only with `dropout_p == 0`; production training support is not claimed. |
+| Runtime fallbacks | Supported SM75 calls do not use SDPA or xFormers fallbacks. |
+
+## Benchmarks
+
+On the disclosed RTX 2080 Ti benchmark matrix, the SM75 public attention
+operations achieved a 1.723x geomean against the included PyTorch SDPA-based
+reference pipelines, with a 1.144x minimum. KV-cache update and decode achieved
+a 2.894x geomean against the included PyTorch reference pipeline, with a 1.184x
+minimum.
+
+These are public-operation pipeline comparisons, not pure kernel timings. The
+GQA reference includes K/V head expansion. The variable-length reference uses
+per-sequence Python calls and concatenation. The KV-cache reference includes
+cache update, page-to-dense conversion where needed, rotary, concatenation,
+left-padding handling, GQA expansion, and SDPA.
+
+Installed-wheel Transformers generation achieved about a 1.100x end-to-end
+geomean, with a 0.963x minimum. Attention is only part of whole-model runtime,
+so the component benchmark gains should not be read as whole-model gains.
+
+## Limitations
+
+- CUDA stream and device handling still needs a complete audit and
+  non-default-stream testing.
+- Dropout is disabled because the SM75 code does not implement compatible CUDA
+  RNG and Philox state handling.
+- The first release is intended for experimental inference use.
+- Hardware testing outside the RTX 2080 Ti is incomplete.
+
+## Tests And Reproducibility
+
+Release results must come from an installed wheel, not imports from the source
+tree. The release report must record the Python, PyTorch, CUDA, Transformers,
+driver, compiler, model revisions, commands, warmups, sample counts, and raw
+benchmark output.
+
+Current local validation commands include:
+
 ```sh
 make sm75-ci
 make sm75-sanitize
 ```
 
-Latest RTX 2080 Ti audit evidence in this workspace is in the outer `evidence-sm75/` directory, not in this source tree. The broad audit includes 84 native-only tests, an 88-case expanded correctness run, a 50-test compute-sanitizer subset with zero errors, clean wheel install logs, Transformers FA2 generation logs, broad raw benchmark JSON, and a blocker report for slow generic/paged paths. Do not use the older narrow 60-test or 4-row benchmark results as performance proof.
+A small release report and its benchmark data will be committed under
+`docs/release/`. Larger raw logs can be attached to the GitHub prerelease.
 
-### AMD ROCm Support
-ROCm version has two backends. There is [composable_kernel](https://github.com/ROCm/composable_kernel) (ck) which is the default backend and a [Triton](https://github.com/triton-lang/triton) backend. They provide an implementation of FlashAttention-2.
+## Provenance And Licenses
 
-**Requirements:**
-- ROCm 6.0 and above.
+The upstream Dao-AILab code remains under its upstream license. Source
+provenance and third-party license details are recorded in
+`csrc/flash_attn_sm75/NOTICE.md`.
 
-We recommend the
-[Pytorch](https://hub.docker.com/r/rocm/pytorch)
-container from ROCm, which has all the required tools to install FlashAttention.
+## AI-Assisted Development
 
-#### Composable Kernel Backend
-FlashAttention-2 ROCm CK backend currently supports:
-1. MI200x, MI250x, MI300x, MI355x, and RDNA 3/4 GPUs.
-2. Datatype fp16 and bf16
-3. Both forward's and backward's head dimensions up to 256.
-4. RDNA 3 GPUs do not currently support backward, and RDNA 4 GPUs support backward only with deterministic=False
+Development was substantially assisted by OpenAI coding agents. Project
+direction, hardware operation, benchmark design, acceptance criteria, review,
+and release validation were performed by the maintainer. Published claims are
+tied to included reproducible tests and benchmark artifacts.
 
-#### Triton Backend
-The Triton implementation of [Flash Attention](https://tridao.me/publications/flash2/flash2.pdf) supports AMD's CDNA (MI200, MI300) and RDNA GPUs using fp16, bf16, and fp32 datatypes. It provides forward and backward passes with causal masking, variable sequence lengths, arbitrary Q/KV sequence lengths and head sizes, MQA/GQA, dropout, rotary embeddings, ALiBi, paged attention, and FP8 (via the Flash Attention v3 interface). Sliding window attention is currently a work in progress.
+## Upstream Credits
 
-The Triton backend kernels are provided by the [aiter](https://github.com/ROCm/aiter) package, included as a git submodule at `third_party/aiter` and automatically installed during setup.
+FlashAttention and FlashAttention-2 were created by Tri Dao and collaborators.
+Please cite the upstream work when using this fork:
 
-To install, first get PyTorch for ROCm from https://pytorch.org/get-started/locally/, then install Flash Attention:
-```sh
-cd flash-attention
-FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pip install --no-build-isolation .
-```
+- [FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness](https://arxiv.org/abs/2205.14135)
+- [FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning](https://tridao.me/publications/flash2/flash2.pdf)
 
-To use a specific aiter commit (e.g., for testing or development):
-```sh
-cd flash-attention
-cd third_party/aiter && git fetch origin && git checkout <commit-sha> && cd ../..
-FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pip install --no-build-isolation .
-```
-
-To run the tests (note: full suite takes hours):
-```sh
-FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pytest tests/test_flash_attn_triton_amd.py
-```
-
-The Triton backend uses a default kernel configuration optimized for determinism and reasonable performance across workloads. For peak throughput, enable `FLASH_ATTENTION_TRITON_AMD_AUTOTUNE="TRUE"` to search for optimal settings, which incurs a one-time warmup cost.
-
-Alternativly, if _not_ autotuning, `FLASH_ATTENTION_FWD_TRITON_AMD_CONFIG_JSON` may be used to set a single triton config overriding the hardcoded defaults for `attn_fwd`. E.g.
-```sh
-FLASH_ATTENTION_FWD_TRITON_AMD_CONFIG_JSON='{"BLOCK_M":128,"BLOCK_N":64,"waves_per_eu":1,"PRE_LOAD_V":false,"num_stages":1,"num_warps":8}'
-```
-
-For a quick start with Docker:
-```dockerfile
-FROM rocm/pytorch:latest
-
-WORKDIR /workspace
-
-# build flash attention with triton backend
-RUN git clone https://github.com/Dao-AILab/flash-attention &&\ 
-    cd flash-attention &&\
-    FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE" pip install --no-build-isolation .
-
-# set working dir
-WORKDIR /workspace/flash-attention
-
-# set env variable to use triton backend
-ENV FLASH_ATTENTION_TRITON_AMD_ENABLE="TRUE"
-```
-
-Build and run:
-```sh
-docker build -t flash-attn-triton .
-docker run -it --network=host --user root --group-add video --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --ipc=host --shm-size 16G --device=/dev/kfd --device=/dev/dri flash-attn-triton
-```
-
-## How to use FlashAttention
-
-The main functions implement scaled dot product attention (softmax(Q @ K^T *
-softmax_scale) @ V):
-```python
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
-```
-
-```python
-flash_attn_qkvpacked_func(qkv, dropout_p=0.0, softmax_scale=None, causal=False,
-                          window_size=(-1, -1), alibi_slopes=None, deterministic=False):
-"""dropout_p should be set to 0.0 during evaluation
-If Q, K, V are already stacked into 1 tensor, this function will be faster than
-calling flash_attn_func on Q, K, V since the backward pass avoids explicit concatenation
-of the gradients of Q, K, V.
-If window_size != (-1, -1), implements sliding window local attention. Query at position i
-will only attend to keys between [i - window_size[0], i + window_size[1]] inclusive.
-Arguments:
-    qkv: (batch_size, seqlen, 3, nheads, headdim)
-    dropout_p: float. Dropout probability.
-    softmax_scale: float. The scaling of QK^T before applying softmax.
-        Default to 1 / sqrt(headdim).
-    causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
-    window_size: (left, right). If not (-1, -1), implements sliding window local attention.
-    alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of (-alibi_slope * |i - j|) is added to
-        the attention score of query i and key j.
-    deterministic: bool. Whether to use the deterministic implementation of the backward pass,
-        which is slightly slower and uses more memory. The forward pass is always deterministic.
-Return:
-    out: (batch_size, seqlen, nheads, headdim).
-"""
-```
-
-```python
-flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False,
-                window_size=(-1, -1), alibi_slopes=None, deterministic=False):
-"""dropout_p should be set to 0.0 during evaluation
-Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
-than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
-For example, if Q has 6 heads and K, V have 2 heads, head 0, 1, 2 of Q will attention to head
-0 of K, V, and head 3, 4, 5 of Q will attention to head 1 of K, V.
-If window_size != (-1, -1), implements sliding window local attention. Query at position i
-will only attend to keys between
-[i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
-
-Arguments:
-    q: (batch_size, seqlen, nheads, headdim)
-    k: (batch_size, seqlen, nheads_k, headdim)
-    v: (batch_size, seqlen, nheads_k, headdim)
-    dropout_p: float. Dropout probability.
-    softmax_scale: float. The scaling of QK^T before applying softmax.
-        Default to 1 / sqrt(headdim).
-    causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
-    window_size: (left, right). If not (-1, -1), implements sliding window local attention.
-    alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of
-        (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
-        is added to the attention score of query i and key j.
-    deterministic: bool. Whether to use the deterministic implementation of the backward pass,
-        which is slightly slower and uses more memory. The forward pass is always deterministic.
-Return:
-    out: (batch_size, seqlen, nheads, headdim).
-"""
-```
-
-```python
-def flash_attn_with_kvcache(
-    q,
-    k_cache,
-    v_cache,
-    k=None,
-    v=None,
-    rotary_cos=None,
-    rotary_sin=None,
-    cache_seqlens: Optional[Union[(int, torch.Tensor)]] = None,
-    cache_batch_idx: Optional[torch.Tensor] = None,
-    block_table: Optional[torch.Tensor] = None,
-    softmax_scale=None,
-    causal=False,
-    window_size=(-1, -1),  # -1 means infinite context window
-    rotary_interleaved=True,
-    alibi_slopes=None,
-):
-    """
-    If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
-    k and v. This is useful for incremental decoding: you can pass in the cached keys/values from
-    the previous step, and update them with the new keys/values from the current step, and do
-    attention with the updated cache, all in 1 kernel.
-
-    If you pass in k / v, you must make sure that the cache is large enough to hold the new values.
-    For example, the KV cache could be pre-allocated with the max sequence length, and you can use
-    cache_seqlens to keep track of the current sequence lengths of each sequence in the batch.
-
-    Also apply rotary embedding if rotary_cos and rotary_sin are passed in. The key @k will be
-    rotated by rotary_cos and rotary_sin at indices cache_seqlens, cache_seqlens + 1, etc.
-    If causal or local (i.e., window_size != (-1, -1)), the query @q will be rotated by rotary_cos
-    and rotary_sin at indices cache_seqlens, cache_seqlens + 1, etc.
-    If not causal and not local, the query @q will be rotated by rotary_cos and rotary_sin at
-    indices cache_seqlens only (i.e. we consider all tokens in @q to be at position cache_seqlens).
-
-    See tests/test_flash_attn.py::test_flash_attn_kvcache for examples of how to use this function.
-
-    Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
-    than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
-    For example, if Q has 6 heads and K, V have 2 heads, head 0, 1, 2 of Q will attention to head
-    0 of K, V, and head 3, 4, 5 of Q will attention to head 1 of K, V.
-
-    If causal=True, the causal mask is aligned to the bottom right corner of the attention matrix.
-    For example, if seqlen_q = 2 and seqlen_k = 5, the causal mask (1 = keep, 0 = masked out) is:
-        1 1 1 1 0
-        1 1 1 1 1
-    If seqlen_q = 5 and seqlen_k = 2, the causal mask is:
-        0 0
-        0 0
-        0 0
-        1 0
-        1 1
-    If the row of the mask is all zero, the output will be zero.
-
-    If window_size != (-1, -1), implements sliding window local attention. Query at position i
-    will only attend to keys between
-    [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q + window_size[1]] inclusive.
-
-    Note: Does not support backward pass.
-
-    Arguments:
-        q: (batch_size, seqlen, nheads, headdim)
-        k_cache: (batch_size_cache, seqlen_cache, nheads_k, headdim) if there's no block_table,
-            or (num_blocks, page_block_size, nheads_k, headdim) if there's a block_table (i.e. paged KV cache)
-            page_block_size must be a multiple of 256.
-        v_cache: (batch_size_cache, seqlen_cache, nheads_k, headdim) if there's no block_table,
-            or (num_blocks, page_block_size, nheads_k, headdim) if there's a block_table (i.e. paged KV cache)
-        k [optional]: (batch_size, seqlen_new, nheads_k, headdim). If not None, we concatenate
-            k with k_cache, starting at the indices specified by cache_seqlens.
-        v [optional]: (batch_size, seqlen_new, nheads_k, headdim). Similar to k.
-        rotary_cos [optional]: (seqlen_ro, rotary_dim / 2). If not None, we apply rotary embedding
-            to k and q. Only applicable if k and v are passed in. rotary_dim must be divisible by 16.
-        rotary_sin [optional]: (seqlen_ro, rotary_dim / 2). Similar to rotary_cos.
-        cache_seqlens: int, or (batch_size,), dtype torch.int32. The sequence lengths of the
-            KV cache.
-        block_table [optional]: (batch_size, max_num_blocks_per_seq), dtype torch.int32.
-        cache_batch_idx: (batch_size,), dtype torch.int32. The indices used to index into the KV cache.
-            If None, we assume that the batch indices are [0, 1, 2, ..., batch_size - 1].
-            If the indices are not distinct, and k and v are provided, the values updated in the cache
-                 might come from any of the duplicate indices.
-        softmax_scale: float. The scaling of QK^T before applying softmax.
-            Default to 1 / sqrt(headdim).
-        causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
-        window_size: (left, right). If not (-1, -1), implements sliding window local attention.
-        rotary_interleaved: bool. Only applicable if rotary_cos and rotary_sin are passed in.
-            If True, rotary embedding will combine dimensions 0 & 1, 2 & 3, etc. If False,
-            rotary embedding will combine dimensions 0 & rotary_dim / 2, 1 & rotary_dim / 2 + 1
-            (i.e. GPT-NeoX style).
-        alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of
-            (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
-            is added to the attention score of query i and key j.
-
-    Return:
-        out: (batch_size, seqlen, nheads, headdim).
-    """
-```
-
-To see how these functions are used in a multi-head attention layer (which
-includes QKV projection, output projection), see the MHA [implementation](https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/modules/mha.py).
-
-### Using with 🤗 Kernels
-
-If your hardware environment belongs to any of the above-mentioned, you can also use the [`kernels` library](https://github.com/huggingface/kernels)
-to use Flash Attention 2 and 3 right away.
-
-```py
-# pip install kernels
-
-from kernels import get_kernel
-
-# FA2
-fa_module = get_kernel("kernels-community/flash-attn2", version=1)
-flash_attn_func = fa_module.flash_attn_func
-
-# FA3
-fa3_module = get_kernel("kernels-community/flash-attn3", version=1)
-flash_attn_func = fa3_module.flash_attn_func
-```
-
-## Changelog
-
-### 2.0: Complete rewrite, 2x faster
-Upgrading from FlashAttention (1.x) to FlashAttention-2
-
-These functions have been renamed:
-- `flash_attn_unpadded_func` -> `flash_attn_varlen_func`
-- `flash_attn_unpadded_qkvpacked_func` -> `flash_attn_varlen_qkvpacked_func`
-- `flash_attn_unpadded_kvpacked_func` -> `flash_attn_varlen_kvpacked_func`
-
-If the inputs have the same sequence lengths in the same batch, it is simpler
-and faster to use these functions:
-```python
-flash_attn_qkvpacked_func(qkv, dropout_p=0.0, softmax_scale=None, causal=False)
-```
-```python
-flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False)
-```
-### 2.1: Change behavior of causal flag
-
-If seqlen_q != seqlen_k and causal=True, the causal mask is aligned to the
-bottom right corner of the attention matrix, instead of the top-left corner.
-
-For example, if seqlen_q = 2 and seqlen_k = 5, the causal mask (1 = keep, 0 =
-masked out) is:  
-v2.0:  
-    1 0 0 0 0  
-    1 1 0 0 0  
-v2.1:  
-    1 1 1 1 0  
-    1 1 1 1 1  
-
-If seqlen_q = 5 and seqlen_k = 2, the causal mask is:  
-v2.0:  
-    1 0  
-    1 1  
-    1 1  
-    1 1  
-    1 1  
-v2.1:  
-    0 0  
-    0 0  
-    0 0  
-    1 0  
-    1 1  
-If the row of the mask is all zero, the output will be zero.
-
-### 2.2: Optimize for inference
-
-Optimize for inference (iterative decoding) when query has very small sequence
-length (e.g., query sequence length = 1). The bottleneck here is to load KV
-cache as fast as possible, and we split the loading across different thread
-blocks, with a separate kernel to combine results.
-
-See the function `flash_attn_with_kvcache` with more features for inference
-(perform rotary embedding, updating KV cache inplace).
-
-Thanks to the xformers team, and in particular Daniel Haziza, for this
-collaboration.
-
-### 2.3: Local (i.e., sliding window) attention
-
-Implement sliding window attention (i.e., local attention). Thanks to [Mistral
-AI](https://mistral.ai/) and in particular Timothée Lacroix for this
-contribution. Sliding window was used in the [Mistral 7B](https://mistral.ai/news/announcing-mistral-7b/) model.
-
-### 2.4: ALiBi (attention with linear bias), deterministic backward pass.
-
-Implement ALiBi (Press et al., 2021). Thanks to Sanghun Cho from Kakao Brain for this contribution.
-
-Implement deterministic backward pass. Thanks to engineers from [Meituan](www.meituan.com) for this contribution.
-
-### 2.5: Paged KV cache.
-
-Support paged KV cache (i.e., [PagedAttention](https://arxiv.org/abs/2309.06180)).
-Thanks to @beginlner for this contribution.
-
-### 2.6: Softcapping.
-
-Support attention with softcapping, as used in Gemma-2 and Grok models.
-Thanks to @Narsil and @lucidrains for this contribution.
-
-### 2.7: Compatibility with torch compile
-
-Thanks to @ani300 for this contribution.
-
-## Performance
-
-We present expected speedup (combined forward + backward pass) and memory savings from using FlashAttention against PyTorch standard attention, depending on sequence length, on different GPUs (speedup depends on memory bandwidth - we see more speedup on slower GPU memory).
-
-We currently have benchmarks for these GPUs:
-* [A100](#a100)
-* [H100](#h100)
-<!-- * [RTX 3090](#rtx-3090) -->
-<!-- * [T4](#t4) -->
-
-### A100
-
-We display FlashAttention speedup using these parameters:
-* Head dimension 64 or 128, hidden dimension 2048 (i.e. either 32 or 16 heads).
-* Sequence length 512, 1k, 2k, 4k, 8k, 16k.
-* Batch size set to 16k / seqlen.
-
-#### Speedup
-
-![FlashAttention speedup on A100 80GB SXM5 with FP16/BF16](assets/flash2_a100_fwd_bwd_benchmark.png)
-
-#### Memory
-
-![FlashAttention memory](assets/flashattn_memory.jpg)
-
-We show memory savings in this graph (note that memory footprint is the same no matter if you use dropout or masking).
-Memory savings are proportional to sequence length -- since standard attention has memory quadratic in sequence length, whereas FlashAttention has memory linear in sequence length.
-We see 10X memory savings at sequence length 2K, and 20X at 4K.
-As a result, FlashAttention can scale to much longer sequence lengths.
-
-### H100
-
-![FlashAttention speedup on H100 SXM5 with FP16/BF16](assets/flash2_h100_fwd_bwd_benchmark.png)
-
-## Full model code and training script
-
-We have released the full GPT model
-[implementation](https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/models/gpt.py).
-We also provide optimized implementations of other layers (e.g., MLP, LayerNorm,
-cross-entropy loss, rotary embedding). Overall this speeds up training by 3-5x
-compared to the baseline implementation from Huggingface, reaching up to 225
-TFLOPs/sec per A100, equivalent to 72% model FLOPs utilization (we don't need
-any activation checkpointing).
-
-We also include a training
-[script](https://github.com/Dao-AILab/flash-attention/tree/main/training) to
-train GPT2 on Openwebtext and GPT3 on The Pile.
-
-## Triton implementation of FlashAttention
-
-Phil Tillet (OpenAI) has an experimental implementation of FlashAttention in Triton:
-https://github.com/openai/triton/blob/master/python/tutorials/06-fused-attention.py
-
-As Triton is a higher-level language than CUDA, it might be easier to understand
-and experiment with. The notations in the Triton implementation are also closer
-to what's used in our paper.
-
-We also have an experimental implementation in Triton that support attention
-bias (e.g. ALiBi):
-https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/flash_attn_triton.py
-
-
-## Tests
-We test that FlashAttention produces the same output and gradient as a reference
-implementation, up to some numerical tolerance. In particular, we check that the
-maximum numerical error of FlashAttention is at most twice the numerical error
-of a baseline implementation in Pytorch (for different head dimensions, input
-dtype, sequence length, causal / non-causal).
-
-To run the tests:
-```sh
-pytest -q -s tests/test_flash_attn.py
-```
-## When you encounter issues
-
-This new release of FlashAttention-2 has been tested on several GPT-style
-models, mostly on A100 GPUs.
-
-If you encounter bugs, please open a GitHub Issue!
-
-## Tests
-To run the tests:
-```sh
-pytest tests/test_flash_attn_ck.py
-```
-
-## Citation
-If you use this codebase, or otherwise found our work valuable, please cite:
-```
-@inproceedings{dao2022flashattention,
-  title={Flash{A}ttention: Fast and Memory-Efficient Exact Attention with {IO}-Awareness},
-  author={Dao, Tri and Fu, Daniel Y. and Ermon, Stefano and Rudra, Atri and R{\'e}, Christopher},
-  booktitle={Advances in Neural Information Processing Systems (NeurIPS)},
-  year={2022}
-}
-@inproceedings{dao2023flashattention2,
-  title={Flash{A}ttention-2: Faster Attention with Better Parallelism and Work Partitioning},
-  author={Dao, Tri},
-  booktitle={International Conference on Learning Representations (ICLR)},
-  year={2024}
-}
-```
+Upstream source and full documentation:
+[Dao-AILab/flash-attention](https://github.com/Dao-AILab/flash-attention).

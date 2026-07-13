@@ -115,19 +115,15 @@ def test_packed_axis_matrix_forward_native(monkeypatch, headdim):
 
 
 @pytest.mark.parametrize("headdim", [32, 64, 80, 96, 112, 128, 160, 192, 224, 256])
-def test_dense_dropout_local_axis_matrix_native(monkeypatch, headdim):
+def test_dense_dropout_axis_matrix_rejected_on_sm75(monkeypatch, headdim):
     enable_native_only(monkeypatch)
     device = require_sm75()
     torch.manual_seed(1700 + headdim)
-    q = torch.randn(1, 64, 8, headdim, device=device, dtype=torch.float16, requires_grad=True)
-    k = torch.randn(1, 80, 4, headdim, device=device, dtype=torch.float16, requires_grad=True)
-    v = torch.randn_like(k, requires_grad=True)
-    out = flash_attn_func(q, k, v, dropout_p=0.1, causal=True, window_size=(32, 0))
-    loss = out.float().square().mean()
-    loss.backward()
-    assert q.grad is not None and k.grad is not None and v.grad is not None
-    assert not torch.isnan(out).any()
-    assert_sm75_backend()
+    q = torch.randn(1, 64, 8, headdim, device=device, dtype=torch.float16)
+    k = torch.randn(1, 80, 4, headdim, device=device, dtype=torch.float16)
+    v = torch.randn_like(k)
+    with pytest.raises(RuntimeError, match="SM75 attention dropout is disabled"):
+        flash_attn_func(q, k, v, dropout_p=0.1, causal=True, window_size=(32, 0))
 
 
 def test_qkvpacked_and_kvpacked_backward_native(monkeypatch):

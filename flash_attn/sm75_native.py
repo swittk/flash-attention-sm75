@@ -26,6 +26,11 @@ _STATE_LOCK = threading.Lock()
 _LAST_BACKEND: Optional[str] = None
 _SM75_DEVICE_CACHE: Dict[int, bool] = {}
 _DIRECT_FWD_BACKEND_CACHE: Dict[Tuple[int, bool, bool], str] = {}
+_SM75_DROPOUT_REJECTION = (
+    "SM75 attention dropout is disabled in this experimental release; "
+    "dropout_p must be 0.0 because native PyTorch-compatible CUDA RNG/Philox "
+    "semantics are not implemented"
+)
 
 
 def _env_true(name: str) -> bool:
@@ -157,7 +162,7 @@ def _common_rejection(
     if _kernel_head_dim(q.shape[-1]) is None:
         return f"head_dim {q.shape[-1]} has no native SM75 kernel in this backend slice"
     if dropout_p != 0.0:
-        return "dropout needs a native SM75 dropout kernel"
+        return _SM75_DROPOUT_REJECTION
     if window_size_left != -1 or window_size_right != -1:
         return "local attention needs a native SM75 local-mask kernel"
     if alibi_slopes is not None:
@@ -194,6 +199,8 @@ def _forward_rejection(
         return f"head_dim {q.shape[-1]} has no native SM75 forward kernel"
     if dropout_p < 0.0 or dropout_p >= 1.0:
         return "dropout_p must be in [0, 1)"
+    if dropout_p != 0.0:
+        return _SM75_DROPOUT_REJECTION
     if alibi_slopes is not None:
         if not (alibi_slopes.is_cuda and alibi_slopes.device == q.device):
             return "ALiBi slopes must be on the same CUDA device as q"
@@ -266,6 +273,8 @@ def _varlen_rejection(
         return "query heads must be divisible by key/value heads"
     if dropout_p < 0.0 or dropout_p >= 1.0:
         return "dropout_p must be in [0, 1)"
+    if dropout_p != 0.0:
+        return _SM75_DROPOUT_REJECTION
     if not (cu_seqlens_q.is_cuda and cu_seqlens_k.is_cuda):
         return "cu_seqlens_q and cu_seqlens_k must be CUDA tensors"
     if cu_seqlens_q.dtype != torch.int32 or cu_seqlens_k.dtype != torch.int32:
@@ -1026,6 +1035,8 @@ def try_varlen_forward(
             reason = "query heads must be divisible by key/value heads"
         elif dropout_p < 0.0 or dropout_p >= 1.0:
             reason = "dropout_p must be in [0, 1)"
+        elif dropout_p != 0.0:
+            reason = _SM75_DROPOUT_REJECTION
         elif not (cu_seqlens_q.is_cuda and cu_seqlens_k.is_cuda):
             reason = "cu_seqlens_q and cu_seqlens_k must be CUDA tensors"
         elif cu_seqlens_q.dtype != torch.int32 or cu_seqlens_k.dtype != torch.int32:
