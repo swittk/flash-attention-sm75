@@ -1,7 +1,10 @@
-Acknowledgments
-===============
+SM75 backend attribution
+========================
 
-The SM75 backend takes inspiration from FlashAttention-2 and prior Turing
-implementations, including:
+Parts of the SM75 forward and backward kernel implementation are derived from
+SSIU's flash-attention-turing project:
 
 https://github.com/ssiu/flash-attention-turing
+
+This fork adds its own SM75 API integration, dispatch, generic and specialized
+kernels, packed and variable-length paths, and KV-cache support.

@@ -134,9 +134,10 @@ A small release report and its benchmark data will be committed under
 
 ## Provenance And Licenses
 
-The upstream Dao-AILab code remains under its upstream license. Source
-provenance and third-party license details are recorded in
-`csrc/flash_attn_sm75/NOTICE.md`.
+The upstream Dao-AILab code remains under its upstream license. Parts of the
+SM75 forward and backward kernel implementation are derived from
+[SSIU's flash-attention-turing](https://github.com/ssiu/flash-attention-turing).
+See `csrc/flash_attn_sm75/NOTICE.md` for attribution.
 
 ## AI-Assisted Development
 
