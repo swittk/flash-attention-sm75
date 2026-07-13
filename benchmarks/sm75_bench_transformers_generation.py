@@ -9,7 +9,13 @@ import time
 import torch
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if REPO_ROOT not in sys.path:
+USE_INSTALLED_FLASH_ATTN = os.getenv("FLASH_ATTN_BENCH_USE_INSTALLED", "0").upper() in {
+    "1",
+    "TRUE",
+    "YES",
+    "ON",
+}
+if not USE_INSTALLED_FLASH_ATTN and REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 
@@ -209,8 +215,9 @@ def _run_case_subprocess(model_id, prompt_len, new_tokens, warmup, out_path, idx
         "--no-isolate-cases",
     ]
     env = os.environ.copy()
-    pythonpath = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = REPO_ROOT if not pythonpath else f"{REPO_ROOT}{os.pathsep}{pythonpath}"
+    if not USE_INSTALLED_FLASH_ATTN:
+        pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = REPO_ROOT if not pythonpath else f"{REPO_ROOT}{os.pathsep}{pythonpath}"
     proc = subprocess.run(cmd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.stdout:
         print(proc.stdout, end="", flush=True)
