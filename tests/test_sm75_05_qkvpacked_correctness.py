@@ -33,6 +33,43 @@ def test_qkvpacked_d64_uses_single_packed_tensor_launch(monkeypatch):
     )
 
 
+def test_qkvpacked_d128_short_query_uses_fa2_route(monkeypatch):
+    enable_native_only(monkeypatch)
+    q, k, v = make_qkv(
+        batch=1,
+        seqlen_q=128,
+        seqlen_k=128,
+        nheads=8,
+        nheads_k=8,
+        headdim=128,
+    )
+    qkv = torch.stack([q, k, v], dim=2)
+    out = flash_attn_qkvpacked_func(qkv, causal=True)
+    close_to_ref(out, attention_ref(q, k, v, causal=True))
+    assert_sm75_backend(
+        "sm75_native_qkvpacked_direct_strided_"
+        "dense_hd128_fa2_shortq_tiled_kernel128"
+    )
+
+
+def test_qkvpacked_d128_long_query_keeps_long_query_route(monkeypatch):
+    enable_native_only(monkeypatch)
+    q, k, v = make_qkv(
+        batch=1,
+        seqlen_q=256,
+        seqlen_k=256,
+        nheads=8,
+        nheads_k=8,
+        headdim=128,
+    )
+    qkv = torch.stack([q, k, v], dim=2)
+    out = flash_attn_qkvpacked_func(qkv, causal=False)
+    close_to_ref(out, attention_ref(q, k, v, causal=False))
+    assert_sm75_backend(
+        "sm75_native_qkvpacked_direct_strided_fwd_hd128_kernel128"
+    )
+
+
 def test_kvpacked_forward_correctness(monkeypatch):
     enable_native_only(monkeypatch)
     q, k, v = make_qkv(seqlen_q=15, seqlen_k=17, nheads=4, nheads_k=2, headdim=64)

@@ -38,6 +38,13 @@ std::vector<at::Tensor> mha_fwd_hd64_fa2_sm75(
     bool causal,
     bool head_major);
 
+std::vector<at::Tensor> mha_fwd_hd128_fa2_sm75(
+    at::Tensor q,
+    at::Tensor k,
+    at::Tensor v,
+    float softmax_scale,
+    bool causal);
+
 std::vector<at::Tensor> mha_fwd_qkvpacked_hd64_fa2_sm75(
     at::Tensor qkv,
     float softmax_scale,
@@ -634,6 +641,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("varlen_bwd", &mha_varlen_bwd, "Varlen backward pass");
     m.def("fwd_generic", &mha_fwd_generic_sm75, "Generic SM75 forward pass");
     m.def("fwd_hd64_fa2", &mha_fwd_hd64_fa2_sm75, "Tiled FA2 SM75 head-dim 64 MHA forward pass");
+    m.def("fwd_hd128_fa2", &mha_fwd_hd128_fa2_sm75, "Short-query tiled FA2 SM75 head-dim 128 forward pass");
     m.def("fwd_qkvpacked_hd64_fa2", &mha_fwd_qkvpacked_hd64_fa2_sm75, "Direct packed tiled FA2 SM75 head-dim 64 forward pass");
     m.def("fwd_hd96_fa2", &mha_fwd_hd96_fa2_sm75, "Tiled FA2 SM75 head-dim 96 forward pass");
     m.def("varlen_fwd_hd96_fa2", &mha_varlen_fwd_hd96_fa2_sm75, "Tiled FA2 SM75 head-dim 96 varlen forward pass");

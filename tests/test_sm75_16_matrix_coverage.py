@@ -92,6 +92,25 @@ def test_dense_axis_matrix_forward_native(monkeypatch, batch, seqlen_q, seqlen_k
     assert_sm75_backend()
 
 
+@pytest.mark.parametrize(
+    "seqlen_q,backend",
+    [
+        (128, "sm75_native_dense_hd128_fa2_shortq_tiled_kernel128"),
+        (256, "sm75_native_fwd_hd128_kernel128"),
+    ],
+)
+def test_dense_hd128_short_query_dispatch_boundary(monkeypatch, seqlen_q, backend):
+    enable_native_only(monkeypatch)
+    device = require_sm75()
+    torch.manual_seed(1640 + seqlen_q)
+    q = torch.randn(1, seqlen_q, 32, 128, device=device, dtype=torch.float16)
+    k = torch.randn(1, 512, 8, 128, device=device, dtype=torch.float16)
+    v = torch.randn_like(k)
+    out = flash_attn_func(q, k, v, causal=True)
+    close_to_ref(out, attention_ref(q, k, v, causal=True), atol=8e-2, rtol=8e-2)
+    assert_sm75_backend(backend)
+
+
 @pytest.mark.parametrize("headdim", HEAD_DIM_AXIS if FULL_MATRIX else [64, 96, 160, 224, 256])
 def test_packed_axis_matrix_forward_native(monkeypatch, headdim):
     enable_native_only(monkeypatch)

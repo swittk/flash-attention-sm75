@@ -508,6 +508,11 @@ def try_qkvpacked_forward_fast(
                 q, k, v, float(softmax_scale), bool(causal)
             )
             backend_kind = f"dense_hd{head_dim}_fa2_tiled_kernel256"
+        elif head_dim == 128 and q.shape[1] <= 128:
+            out, _ = _sm75_cuda.fwd_hd128_fa2(
+                q, k, v, float(softmax_scale), bool(causal)
+            )
+            backend_kind = "dense_hd128_fa2_shortq_tiled_kernel128"
         else:
             out, _ = _sm75_cuda.fwd(
                 q, k, v, float(softmax_scale), bool(causal)
@@ -787,6 +792,10 @@ def try_forward(
             out, softmax_lse = _sm75_cuda.fwd_hd256_fa2(
                 q_sm75, k_sm75, v_sm75, float(softmax_scale), bool(causal)
             )
+        elif kernel_head_dim == 128 and q.shape[-1] == 128 and q.shape[-3] <= 128:
+            out, softmax_lse = _sm75_cuda.fwd_hd128_fa2(
+                q_sm75, k_sm75, v_sm75, float(softmax_scale), bool(causal)
+            )
         else:
             out, softmax_lse = _sm75_cuda.fwd(
                 q_sm75, k_sm75, v_sm75, float(softmax_scale), bool(causal)
@@ -802,6 +811,8 @@ def try_forward(
             backend_kind = f"dense_hd{q.shape[-1]}_fa2_tiled_kernel96"
         elif kernel_head_dim == 256:
             backend_kind = f"dense_hd{q.shape[-1]}_fa2_tiled_kernel256"
+        elif kernel_head_dim == 128 and q.shape[-1] == 128 and q.shape[-3] <= 128:
+            backend_kind = "dense_hd128_fa2_shortq_tiled_kernel128"
         elif kernel_head_dim is not None and kernel_head_dim > 128 and q.shape[-1] > 128:
             backend_kind = f"dense_hd{q.shape[-1]}_tiled_kernel{kernel_head_dim}"
         else:
@@ -910,8 +921,18 @@ def try_forward_direct_no_grad(
         or not _is_sm75_tensor(q)
     ):
         return None
-    out, _ = _sm75_cuda.fwd(q, k, v, float(softmax_scale), bool(causal))
-    _set_last_backend(_direct_fwd_backend(head_dim, bool(causal), q_heads != kv_heads))
+    if head_dim == 128 and q.shape[1] <= 128:
+        out, _ = _sm75_cuda.fwd_hd128_fa2(
+            q, k, v, float(softmax_scale), bool(causal)
+        )
+        _set_last_backend(
+            "sm75_native_dense_hd128_fa2_shortq_tiled_kernel128_"
+            f"{'causal' if causal else 'noncausal'}_"
+            f"{'gqa' if q_heads != kv_heads else 'mha'}_fp16"
+        )
+    else:
+        out, _ = _sm75_cuda.fwd(q, k, v, float(softmax_scale), bool(causal))
+        _set_last_backend(_direct_fwd_backend(head_dim, bool(causal), q_heads != kv_heads))
     return out
 
 
