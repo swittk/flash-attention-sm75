@@ -1477,6 +1477,24 @@ def flash_attn_varlen_qkvpacked_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
+    if not qkv.requires_grad:
+        if softmax_scale is None:
+            softmax_scale = qkv.shape[-1] ** (-0.5)
+        sm75_fast_out = _sm75_native.try_varlen_qkvpacked_single_sequence_forward_fast(
+            qkv,
+            cu_seqlens,
+            max_seqlen,
+            dropout_p,
+            softmax_scale,
+            causal,
+            window_size[0],
+            window_size[1],
+            softcap,
+            alibi_slopes,
+            return_attn_probs,
+        )
+        if sm75_fast_out is not None:
+            return sm75_fast_out
     return FlashAttnVarlenQKVPackedFunc.apply(
         qkv,
         cu_seqlens,

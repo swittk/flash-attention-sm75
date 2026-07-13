@@ -40,6 +40,22 @@ def test_varlen_qkvpacked_forward_correctness(monkeypatch):
     assert_sm75_backend()
 
 
+def test_varlen_qkvpacked_single_sequence_uses_direct_packed_kernel(monkeypatch):
+    enable_native_only(monkeypatch)
+    device = require_sm75()
+    torch.manual_seed(6064)
+    q = torch.randn(512, 32, 64, device=device, dtype=torch.float16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    qkv = torch.stack([q, k, v], dim=1)
+    cu = torch.tensor([0, 512], device=device, dtype=torch.int32)
+
+    out = flash_attn_varlen_qkvpacked_func(qkv, cu, 512, causal=True)
+
+    close_to_ref(out, varlen_ref(q, k, v, cu, cu, causal=True))
+    assert_sm75_backend("sm75_native_varlen_qkvpacked_single_sequence_direct_packedtensor")
+
+
 def test_varlen_qkvpacked_d80_vector_tail_correctness(monkeypatch):
     enable_native_only(monkeypatch)
     q, _k, _v, cu_q, _cu_k, max_q, _max_k = make_varlen(

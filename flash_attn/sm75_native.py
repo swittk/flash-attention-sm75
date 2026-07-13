@@ -516,6 +516,55 @@ def try_qkvpacked_forward_fast(
     return out
 
 
+def try_varlen_qkvpacked_single_sequence_forward_fast(
+    qkv: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    max_seqlen: int,
+    dropout_p: float,
+    softmax_scale: float,
+    causal: bool,
+    window_size_left: int,
+    window_size_right: int,
+    softcap: float,
+    alibi_slopes: Optional[torch.Tensor],
+    return_attn_probs: bool,
+) -> Optional[torch.Tensor]:
+    """View a single varlen sequence as dense packed QKV without copying."""
+    if (
+        qkv.dim() != 4
+        or qkv.shape[1] != 3
+        or cu_seqlens.dim() != 1
+        or cu_seqlens.numel() != 2
+        or not cu_seqlens.is_cuda
+        or cu_seqlens.device != qkv.device
+        or cu_seqlens.dtype != torch.int32
+        or max_seqlen != qkv.shape[0]
+    ):
+        return None
+    out = try_qkvpacked_forward_fast(
+        qkv.unsqueeze(0),
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size_left,
+        window_size_right,
+        softcap,
+        alibi_slopes,
+        return_attn_probs,
+    )
+    if out is None:
+        return None
+    backend = get_last_backend() or "sm75_native_qkvpacked_direct_unknown"
+    _set_last_backend(
+        backend.replace(
+            "sm75_native_qkvpacked_",
+            "sm75_native_varlen_qkvpacked_single_sequence_",
+            1,
+        )
+    )
+    return out.squeeze(0)
+
+
 def try_forward(
     q: torch.Tensor,
     k: torch.Tensor,
