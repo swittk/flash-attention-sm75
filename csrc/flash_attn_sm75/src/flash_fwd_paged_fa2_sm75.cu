@@ -117,11 +117,18 @@ std::vector<at::Tensor> mha_paged_kvcache_fwd_fa2_sm75(
     const int window_right,
     const int max_seqlen_k,
     int num_splits) {
-    at::cuda::CUDAGuard device_guard(q.device());
     TORCH_CHECK(q.is_cuda() && k_cache.is_cuda() && v_cache.is_cuda(),
                 "q and paged K/V cache must be CUDA tensors");
     TORCH_CHECK(block_table.is_cuda() && cache_seqlens.is_cuda(),
                 "block_table and cache_seqlens must be CUDA tensors");
+    TORCH_CHECK(q.device() == k_cache.device() && q.device() == v_cache.device()
+                && q.device() == block_table.device() && q.device() == cache_seqlens.device(),
+                "q, cache tensors, block_table, and cache_seqlens must be on the same CUDA device");
+    TORCH_CHECK(!cache_batch_idx.defined() || cache_batch_idx.numel() == 0 || cache_batch_idx.device() == q.device(),
+                "cache_batch_idx must be on the same CUDA device as q");
+    TORCH_CHECK(!cache_leftpad.defined() || cache_leftpad.numel() == 0 || cache_leftpad.device() == q.device(),
+                "cache_leftpad must be on the same CUDA device as q");
+    at::cuda::CUDAGuard device_guard(q.device());
     TORCH_CHECK(q.scalar_type() == at::kHalf
                 && k_cache.scalar_type() == at::kHalf
                 && v_cache.scalar_type() == at::kHalf,

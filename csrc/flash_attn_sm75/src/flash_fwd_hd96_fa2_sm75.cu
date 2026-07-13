@@ -5,6 +5,7 @@
 #include <torch/extension.h>
 
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 
 #include "../../flash_attn/src/flash_fwd_launch_template.h"
@@ -117,6 +118,9 @@ std::vector<at::Tensor> mha_fwd_hd96_fa2_sm75(
     const float softmax_scale,
     const bool causal) {
     TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda(), "q, k, and v must be CUDA tensors");
+    TORCH_CHECK(q.device() == k.device() && q.device() == v.device(),
+                "q, k, and v must be on the same CUDA device");
+    at::cuda::CUDAGuard device_guard(q.device());
     TORCH_CHECK(q.scalar_type() == at::kHalf && k.scalar_type() == at::kHalf && v.scalar_type() == at::kHalf,
                 "SM75 hd96 FA2 requires FP16 inputs");
     TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4,
@@ -194,6 +198,12 @@ std::vector<at::Tensor> mha_varlen_fwd_hd96_fa2_sm75(
     const float softmax_scale,
     const bool causal) {
     TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda(), "q, k, and v must be CUDA tensors");
+    TORCH_CHECK(q.device() == k.device() && q.device() == v.device(),
+                "q, k, and v must be on the same CUDA device");
+    TORCH_CHECK(cu_seqlens_q.is_cuda() && cu_seqlens_k.is_cuda()
+                && q.device() == cu_seqlens_q.device() && q.device() == cu_seqlens_k.device(),
+                "sequence offsets must be on the same CUDA device as q");
+    at::cuda::CUDAGuard device_guard(q.device());
     TORCH_CHECK(q.scalar_type() == at::kHalf && k.scalar_type() == at::kHalf && v.scalar_type() == at::kHalf,
                 "SM75 varlen hd96 FA2 requires FP16 inputs");
     TORCH_CHECK(q.dim() == 3 && k.dim() == 3 && v.dim() == 3,

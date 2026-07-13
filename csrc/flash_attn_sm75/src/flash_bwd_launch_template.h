@@ -4,6 +4,8 @@
 #include "flash_bwd_kernel.h"
 #include "flash_bwd_preprocess_kernel.h"
 #include "static_switch.h"
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <cutlass/numeric_types.h>
 using half_t = cutlass::half_t;
 
@@ -83,11 +85,13 @@ void run_flash_bwd(Flash_bwd_params &params) {
     // so each thread block process 32 rows
     dim3 dimGrid_dot_do_o(params.b, params.h, (params.seqlen_q + 32 - 1) / 32);
     dim3 dimBlock_dot_do_o(1024);
-    flash_bwd_dot_do_o_kernel<Kernel_traits, Is_causal><<<dimGrid_dot_do_o, dimBlock_dot_do_o>>>(params.o_ptr,
+    const auto stream = at::cuda::getCurrentCUDAStream().stream();
+    flash_bwd_dot_do_o_kernel<Kernel_traits, Is_causal><<<dimGrid_dot_do_o, dimBlock_dot_do_o, 0, stream>>>(params.o_ptr,
                     params.do_ptr,
                     params.do_o_ptr,
                     params.cu_seqlens_q,
                     params.b, params.seqlen_q, params.h, params.d, params.is_causal);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
 
     int maxbytes = 65536;
@@ -101,8 +105,11 @@ void run_flash_bwd(Flash_bwd_params &params) {
 
     //auto dq_kernel = flash_bwd_dk_dv_kernel<Kernel_traits, Is_causal>;
     BOOL_SWITCH(is_even_MN, Is_even_MN, [&] {
-    cudaFuncSetAttribute(flash_bwd_dq_kernel<Kernel_traits, Is_causal, Is_even_MN>, cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes);
-    flash_bwd_dq_kernel<Kernel_traits, Is_causal, Is_even_MN><<<dimGrid_dq, dimBlock_dq, maxbytes>>>(params.q_ptr,
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        flash_bwd_dq_kernel<Kernel_traits, Is_causal, Is_even_MN>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        maxbytes));
+    flash_bwd_dq_kernel<Kernel_traits, Is_causal, Is_even_MN><<<dimGrid_dq, dimBlock_dq, maxbytes, stream>>>(params.q_ptr,
                                             params.k_ptr,
                                             params.v_ptr,
                                             params.l_ptr,
@@ -113,6 +120,7 @@ void run_flash_bwd(Flash_bwd_params &params) {
                                             params.cu_seqlens_k,
                                             params.b, params.seqlen_q, params.seqlen_k, params.h, params.h_k, params.h_h_k_ratio, params.d, params.softmax_scale, params.is_causal);
     });
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
 
      // compute dK, dV
@@ -123,8 +131,11 @@ void run_flash_bwd(Flash_bwd_params &params) {
 
      BOOL_SWITCH(is_even_MN, Is_even_MN, [&] {
          //auto dk_dv_kernel = flash_bwd_dk_dv_kernel<Kernel_traits, Is_causal>;
-         cudaFuncSetAttribute(flash_bwd_dk_dv_kernel<Kernel_traits, Is_causal, Is_even_MN>, cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes);
-         flash_bwd_dk_dv_kernel<Kernel_traits, Is_causal, Is_even_MN><<<dimGrid_dk_dv, dimBlock_dk_dv, maxbytes>>>(params.q_ptr,
+         C10_CUDA_CHECK(cudaFuncSetAttribute(
+             flash_bwd_dk_dv_kernel<Kernel_traits, Is_causal, Is_even_MN>,
+             cudaFuncAttributeMaxDynamicSharedMemorySize,
+             maxbytes));
+         flash_bwd_dk_dv_kernel<Kernel_traits, Is_causal, Is_even_MN><<<dimGrid_dk_dv, dimBlock_dk_dv, maxbytes, stream>>>(params.q_ptr,
                                                  params.k_ptr,
                                                  params.v_ptr,
                                                  params.l_ptr,
@@ -136,6 +147,7 @@ void run_flash_bwd(Flash_bwd_params &params) {
                                                  params.cu_seqlens_k,
                                                  params.b, params.seqlen_q, params.seqlen_k, params.h, params.h_k, params.h_h_k_ratio, params.d, params.softmax_scale, params.is_causal);
      });
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
      
 

@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "flash.h"
 #include "static_switch.h"
 
@@ -290,6 +291,9 @@ mha_fwd(at::Tensor q,
         const float softmax_scale,
         bool is_causal)
 {
+    TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda(), "q, k, and v must be CUDA tensors");
+    TORCH_CHECK(q.device() == k.device() && q.device() == v.device(), "q, k, and v must be on the same CUDA device");
+    at::cuda::CUDAGuard device_guard(q.device());
     auto device = q.device();
 
     const auto sizes = q.sizes();
@@ -367,6 +371,12 @@ mha_bwd(at::Tensor q,
         const float softmax_scale,
         bool is_causal)
 {
+    TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda() && out.is_cuda() && l.is_cuda() && dout.is_cuda(),
+                "q, k, v, out, l, and dout must be CUDA tensors");
+    TORCH_CHECK(q.device() == k.device() && q.device() == v.device() && q.device() == out.device()
+                && q.device() == l.device() && q.device() == dout.device(),
+                "q, k, v, out, l, and dout must be on the same CUDA device");
+    at::cuda::CUDAGuard device_guard(q.device());
 
     const auto sizes = q.sizes();
 
@@ -457,6 +467,12 @@ mha_varlen_fwd(at::Tensor q,
                const float softmax_scale,
                bool is_causal)
 {
+    TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda(), "q, k, and v must be CUDA tensors");
+    TORCH_CHECK(q.device() == k.device() && q.device() == v.device(), "q, k, and v must be on the same CUDA device");
+    TORCH_CHECK(cu_seqlens_q.is_cuda() && cu_seqlens_k.is_cuda(), "cu_seqlens_q/cu_seqlens_k must be CUDA tensors");
+    TORCH_CHECK(q.device() == cu_seqlens_q.device() && q.device() == cu_seqlens_k.device(),
+                "cu_seqlens_q/cu_seqlens_k must be on the same CUDA device as q");
+    at::cuda::CUDAGuard device_guard(q.device());
     TORCH_CHECK(q.dim() == 3 && k.dim() == 3 && v.dim() == 3, "q, k, v must be rank-3 packed tensors");
     TORCH_CHECK(cu_seqlens_q.is_cuda() && cu_seqlens_k.is_cuda(), "cu_seqlens_q/cu_seqlens_k must be CUDA tensors");
     TORCH_CHECK(cu_seqlens_q.scalar_type() == torch::kInt32 && cu_seqlens_k.scalar_type() == torch::kInt32,
@@ -526,6 +542,15 @@ mha_varlen_bwd(at::Tensor q,
                const float softmax_scale,
                bool is_causal)
 {
+    TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda() && out.is_cuda() && l.is_cuda() && dout.is_cuda(),
+                "q, k, v, out, l, and dout must be CUDA tensors");
+    TORCH_CHECK(q.device() == k.device() && q.device() == v.device() && q.device() == out.device()
+                && q.device() == l.device() && q.device() == dout.device(),
+                "q, k, v, out, l, and dout must be on the same CUDA device");
+    TORCH_CHECK(cu_seqlens_q.is_cuda() && cu_seqlens_k.is_cuda(), "cu_seqlens_q/cu_seqlens_k must be CUDA tensors");
+    TORCH_CHECK(q.device() == cu_seqlens_q.device() && q.device() == cu_seqlens_k.device(),
+                "cu_seqlens_q/cu_seqlens_k must be on the same CUDA device as q");
+    at::cuda::CUDAGuard device_guard(q.device());
     TORCH_CHECK(q.dim() == 3 && k.dim() == 3 && v.dim() == 3, "q, k, v must be rank-3 packed tensors");
     TORCH_CHECK(cu_seqlens_q.is_cuda() && cu_seqlens_k.is_cuda(), "cu_seqlens_q/cu_seqlens_k must be CUDA tensors");
     TORCH_CHECK(cu_seqlens_q.scalar_type() == torch::kInt32 && cu_seqlens_k.scalar_type() == torch::kInt32,

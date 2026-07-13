@@ -1,4 +1,6 @@
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #include <cuda_fp16.h>
 #include <mma.h>
 #include <torch/extension.h>
@@ -1163,6 +1165,9 @@ std::vector<at::Tensor> mha_fwd_generic_sm75(
     float softcap,
     bool return_softmax) {
     TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda(), "q, k, v must be CUDA tensors");
+    TORCH_CHECK(q.device() == k.device() && q.device() == v.device(),
+                "q, k, and v must be on the same CUDA device");
+    at::cuda::CUDAGuard device_guard(q.device());
     TORCH_CHECK(q.scalar_type() == torch::kFloat16 && k.scalar_type() == torch::kFloat16 && v.scalar_type() == torch::kFloat16,
                 "generic SM75 forward expects FP16 tensors");
     TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4, "q, k, v must be rank-4 tensors");
@@ -1176,6 +1181,8 @@ std::vector<at::Tensor> mha_fwd_generic_sm75(
     TORCH_CHECK(!alibi_slopes.defined() || alibi_slopes.numel() == 0
                 || (alibi_slopes.is_cuda() && alibi_slopes.scalar_type() == torch::kFloat32 && alibi_slopes.is_contiguous()),
                 "ALiBi slopes must be contiguous CUDA fp32 or empty");
+    TORCH_CHECK(!alibi_slopes.defined() || alibi_slopes.numel() == 0 || alibi_slopes.device() == q.device(),
+                "ALiBi slopes must be on the same CUDA device as q");
     TORCH_CHECK(softcap >= 0.0f, "softcap must be non-negative");
 
     auto out = torch::empty_like(q);
@@ -1330,8 +1337,16 @@ std::vector<at::Tensor> paged_kvcache_update_sm75(
     bool rotary_interleaved,
     bool sequential_q_positions) {
     TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda(), "q, k, v must be CUDA tensors");
+    TORCH_CHECK(q.device() == k.device() && q.device() == v.device(),
+                "q, k, and v must be on the same CUDA device");
     TORCH_CHECK(k_cache.is_cuda() && v_cache.is_cuda(), "paged k/v cache must be CUDA tensors");
     TORCH_CHECK(block_table.is_cuda() && cache_seqlens.is_cuda(), "block_table/cache_seqlens must be CUDA tensors");
+    TORCH_CHECK(q.device() == k_cache.device() && q.device() == v_cache.device()
+                && q.device() == block_table.device() && q.device() == cache_seqlens.device(),
+                "q, cache tensors, block_table, and cache_seqlens must be on the same CUDA device");
+    TORCH_CHECK(!cache_batch_idx.defined() || cache_batch_idx.numel() == 0 || cache_batch_idx.device() == q.device(),
+                "cache_batch_idx must be on the same CUDA device as q");
+    at::cuda::CUDAGuard device_guard(q.device());
     TORCH_CHECK(q.scalar_type() == torch::kFloat16 && k.scalar_type() == torch::kFloat16 && v.scalar_type() == torch::kFloat16,
                 "paged SM75 update expects FP16 q/k/v");
     TORCH_CHECK(k_cache.scalar_type() == torch::kFloat16 && v_cache.scalar_type() == torch::kFloat16,
@@ -1359,6 +1374,8 @@ std::vector<at::Tensor> paged_kvcache_update_sm75(
     if (has_rotary) {
         TORCH_CHECK(rotary_sin.defined() && rotary_sin.numel() > 0, "rotary_sin is required with rotary_cos");
         TORCH_CHECK(rotary_cos.is_cuda() && rotary_sin.is_cuda(), "rotary tensors must be CUDA tensors");
+        TORCH_CHECK(rotary_cos.device() == q.device() && rotary_sin.device() == q.device(),
+                    "rotary tensors must be on the same CUDA device as q");
         TORCH_CHECK(rotary_cos.scalar_type() == torch::kFloat16 && rotary_sin.scalar_type() == torch::kFloat16,
                     "SM75 rotary update expects FP16 rotary tensors");
         TORCH_CHECK(rotary_cos.dim() == 2 && rotary_sin.sizes() == rotary_cos.sizes(),
@@ -1416,6 +1433,9 @@ std::vector<at::Tensor> pad_qkv_head_dim_sm75(
     at::Tensor v,
     int64_t padded_head_dim) {
     TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda(), "q/k/v must be CUDA tensors");
+    TORCH_CHECK(q.device() == k.device() && q.device() == v.device(),
+                "q, k, and v must be on the same CUDA device");
+    at::cuda::CUDAGuard device_guard(q.device());
     TORCH_CHECK(q.scalar_type() == torch::kFloat16 && k.scalar_type() == torch::kFloat16 && v.scalar_type() == torch::kFloat16,
                 "SM75 qkv padding expects FP16 tensors");
     TORCH_CHECK(q.dim() == 4 && k.dim() == 4 && v.dim() == 4, "q/k/v must be rank-4 tensors");
@@ -1488,7 +1508,16 @@ std::vector<at::Tensor> mha_paged_kvcache_fwd_sm75(
     int window_right,
     int max_seqlen_k) {
     TORCH_CHECK(q.is_cuda() && k_cache.is_cuda() && v_cache.is_cuda(), "q and paged k/v cache must be CUDA tensors");
+    TORCH_CHECK(q.device() == k_cache.device() && q.device() == v_cache.device(),
+                "q and paged k/v cache must be on the same CUDA device");
     TORCH_CHECK(block_table.is_cuda() && cache_seqlens.is_cuda(), "block_table and cache_seqlens must be CUDA tensors");
+    TORCH_CHECK(q.device() == block_table.device() && q.device() == cache_seqlens.device(),
+                "block_table and cache_seqlens must be on the same CUDA device as q");
+    TORCH_CHECK(!cache_batch_idx.defined() || cache_batch_idx.numel() == 0 || cache_batch_idx.device() == q.device(),
+                "cache_batch_idx must be on the same CUDA device as q");
+    TORCH_CHECK(!cache_leftpad.defined() || cache_leftpad.numel() == 0 || cache_leftpad.device() == q.device(),
+                "cache_leftpad must be on the same CUDA device as q");
+    at::cuda::CUDAGuard device_guard(q.device());
     TORCH_CHECK(q.scalar_type() == torch::kFloat16 && k_cache.scalar_type() == torch::kFloat16 && v_cache.scalar_type() == torch::kFloat16,
                 "direct paged SM75 KV-cache forward expects FP16 tensors");
     TORCH_CHECK(q.dim() == 4 && k_cache.dim() == 4 && v_cache.dim() == 4, "q must be [B,S,H,D], paged cache must be [blocks,page,H,D]");

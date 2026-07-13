@@ -2,6 +2,8 @@
 #pragma once
 #include "flash.h"
 #include "flash_fwd_kernel.h"
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
 #include <cutlass/numeric_types.h>
 #include "static_switch.h"
 using half_t = cutlass::half_t;
@@ -88,11 +90,15 @@ void run_flash_fwd(Flash_fwd_params &params) {
     dim3 dimGrid(num_m_block, params.b, params.h);
     dim3 dimBlock(kNWarps * 32);
     int maxbytes = 65536;
+    const auto stream = at::cuda::getCurrentCUDAStream().stream();
 
 
     BOOL_SWITCH(is_even_MN, Is_even_MN, [&] {
-        cudaFuncSetAttribute(flash_fwd_kernel<Kernel_traits, Is_causal, Is_even_MN>, cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes);
-        flash_fwd_kernel<Kernel_traits, Is_causal, Is_even_MN><<<dimGrid, dimBlock, maxbytes>>>(params.q_ptr,
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            flash_fwd_kernel<Kernel_traits, Is_causal, Is_even_MN>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            maxbytes));
+        flash_fwd_kernel<Kernel_traits, Is_causal, Is_even_MN><<<dimGrid, dimBlock, maxbytes, stream>>>(params.q_ptr,
                                                                                     params.k_ptr,
                                                                                     params.v_ptr,
                                                                                     params.o_ptr,
@@ -122,6 +128,7 @@ void run_flash_fwd(Flash_fwd_params &params) {
                                                                                     params.is_causal);
 
     });
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
 }
 

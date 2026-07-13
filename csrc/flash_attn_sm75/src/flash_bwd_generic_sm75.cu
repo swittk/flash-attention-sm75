@@ -1,4 +1,6 @@
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #include <cuda_fp16.h>
 #include <torch/extension.h>
 
@@ -319,6 +321,9 @@ std::vector<at::Tensor> mha_bwd_generic_sm75(
     at::Tensor alibi_slopes,
     float softcap) {
     TORCH_CHECK(q.is_cuda() && k.is_cuda() && v.is_cuda() && dout.is_cuda(), "q, k, v, dout must be CUDA tensors");
+    TORCH_CHECK(q.device() == k.device() && q.device() == v.device() && q.device() == dout.device(),
+                "q, k, v, and dout must be on the same CUDA device");
+    at::cuda::CUDAGuard device_guard(q.device());
     TORCH_CHECK(q.scalar_type() == torch::kFloat16 && k.scalar_type() == torch::kFloat16
                 && v.scalar_type() == torch::kFloat16 && dout.scalar_type() == torch::kFloat16,
                 "generic SM75 backward expects FP16 tensors");
@@ -336,6 +341,8 @@ std::vector<at::Tensor> mha_bwd_generic_sm75(
     TORCH_CHECK(!alibi_slopes.defined() || alibi_slopes.numel() == 0
                 || (alibi_slopes.is_cuda() && alibi_slopes.scalar_type() == torch::kFloat32 && alibi_slopes.is_contiguous()),
                 "ALiBi slopes must be contiguous CUDA fp32 or empty");
+    TORCH_CHECK(!alibi_slopes.defined() || alibi_slopes.numel() == 0 || alibi_slopes.device() == q.device(),
+                "ALiBi slopes must be on the same CUDA device as q");
     TORCH_CHECK(softcap >= 0.0f, "softcap must be non-negative");
 
     auto dq = torch::empty_like(q);
