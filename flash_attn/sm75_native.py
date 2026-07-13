@@ -565,6 +565,87 @@ def try_varlen_qkvpacked_single_sequence_forward_fast(
     return out.squeeze(0)
 
 
+def try_varlen_single_sequence_forward_fast(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    dropout_p: float,
+    softmax_scale: float,
+    causal: bool,
+    window_size_left: int,
+    window_size_right: int,
+    softcap: float,
+    alibi_slopes: Optional[torch.Tensor],
+    return_attn_probs: bool,
+) -> Optional[torch.Tensor]:
+    """View one varlen Q/K/V sequence as dense tensors without copying."""
+    if (
+        q.dim() != 3
+        or k.dim() != 3
+        or v.dim() != 3
+        or cu_seqlens_q.dim() != 1
+        or cu_seqlens_k.dim() != 1
+        or cu_seqlens_q.numel() != 2
+        or cu_seqlens_k.numel() != 2
+        or not cu_seqlens_q.is_cuda
+        or not cu_seqlens_k.is_cuda
+        or cu_seqlens_q.device != q.device
+        or cu_seqlens_k.device != q.device
+        or k.device != q.device
+        or v.device != q.device
+        or cu_seqlens_q.dtype != torch.int32
+        or cu_seqlens_k.dtype != torch.int32
+        or max_seqlen_q != q.shape[0]
+        or max_seqlen_k != k.shape[0]
+        or k.shape[0] != v.shape[0]
+        or return_attn_probs
+    ):
+        return None
+
+    q_dense, k_dense, v_dense = q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0)
+    out = try_forward_direct_no_grad(
+        q_dense,
+        k_dense,
+        v_dense,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size_left,
+        window_size_right,
+        softcap,
+        alibi_slopes,
+        False,
+    )
+    if out is None:
+        result = try_forward(
+            q_dense,
+            k_dense,
+            v_dense,
+            dropout_p,
+            softmax_scale,
+            causal,
+            window_size_left,
+            window_size_right,
+            softcap,
+            alibi_slopes,
+            False,
+        )
+        if result is None:
+            return None
+        out = result[0]
+    backend = get_last_backend() or "sm75_native_unknown"
+    _set_last_backend(
+        backend.replace(
+            "sm75_native_", "sm75_native_varlen_single_sequence_", 1
+        )
+    )
+    return out.squeeze(0)
+
+
 def try_varlen_kvpacked_single_sequence_forward_fast(
     q: torch.Tensor,
     kv: torch.Tensor,

@@ -20,6 +20,31 @@ def test_varlen_forward_correctness(monkeypatch):
     assert_sm75_backend()
 
 
+@pytest.mark.parametrize("headdim", [64, 80, 96, 128, 160, 192, 224, 256])
+@pytest.mark.parametrize("causal", [False, True])
+def test_varlen_single_sequence_direct_all_head_dims(monkeypatch, headdim, causal):
+    enable_native_only(monkeypatch)
+    device = require_sm75()
+    torch.manual_seed(6000 + headdim + int(causal))
+    q = torch.randn(17, 4, headdim, device=device, dtype=torch.float16)
+    k = torch.randn(23, 2, headdim, device=device, dtype=torch.float16)
+    v = torch.randn_like(k)
+    cu_q = torch.tensor([0, q.shape[0]], device=device, dtype=torch.int32)
+    cu_k = torch.tensor([0, k.shape[0]], device=device, dtype=torch.int32)
+
+    out = flash_attn_varlen_func(
+        q, k, v, cu_q, cu_k, q.shape[0], k.shape[0], causal=causal
+    )
+
+    close_to_ref(
+        out,
+        varlen_ref(q, k, v, cu_q, cu_k, causal=causal),
+        atol=7e-2,
+        rtol=7e-2,
+    )
+    assert_sm75_backend("sm75_native_varlen_single_sequence")
+
+
 def test_varlen_kvpacked_forward_correctness(monkeypatch):
     enable_native_only(monkeypatch)
     q, k, v, cu_q, cu_k, max_q, max_k = make_varlen(headdim=64)
