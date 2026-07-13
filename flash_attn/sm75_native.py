@@ -565,6 +565,71 @@ def try_varlen_qkvpacked_single_sequence_forward_fast(
     return out.squeeze(0)
 
 
+def try_varlen_kvpacked_single_sequence_forward_fast(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    dropout_p: float,
+    softmax_scale: float,
+    causal: bool,
+    window_size_left: int,
+    window_size_right: int,
+    softcap: float,
+    alibi_slopes: Optional[torch.Tensor],
+    return_attn_probs: bool,
+) -> Optional[torch.Tensor]:
+    """View one varlen Q/KV sequence as dense packed KV without copying."""
+    if (
+        q.dim() != 3
+        or kv.dim() != 4
+        or kv.shape[1] != 2
+        or cu_seqlens_q.dim() != 1
+        or cu_seqlens_k.dim() != 1
+        or cu_seqlens_q.numel() != 2
+        or cu_seqlens_k.numel() != 2
+        or not cu_seqlens_q.is_cuda
+        or not cu_seqlens_k.is_cuda
+        or cu_seqlens_q.device != q.device
+        or cu_seqlens_k.device != q.device
+        or kv.device != q.device
+        or cu_seqlens_q.dtype != torch.int32
+        or cu_seqlens_k.dtype != torch.int32
+        or max_seqlen_q != q.shape[0]
+        or max_seqlen_k != kv.shape[0]
+        or return_attn_probs
+    ):
+        return None
+    result = try_packed_forward(
+        "kvpacked",
+        q.unsqueeze(0),
+        kv[:, 0].unsqueeze(0),
+        kv[:, 1].unsqueeze(0),
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_size_left,
+        window_size_right,
+        softcap,
+        alibi_slopes,
+        False,
+    )
+    if result is None:
+        return None
+    out = result[0]
+    backend = get_last_backend() or "sm75_native_kvpacked_direct_unknown"
+    _set_last_backend(
+        backend.replace(
+            "sm75_native_kvpacked_",
+            "sm75_native_varlen_kvpacked_single_sequence_",
+            1,
+        )
+    )
+    return out.squeeze(0)
+
+
 def try_forward(
     q: torch.Tensor,
     k: torch.Tensor,
