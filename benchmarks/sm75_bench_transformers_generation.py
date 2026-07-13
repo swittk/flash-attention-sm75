@@ -53,7 +53,13 @@ def _generate_once(model, inputs, new_tokens):
     torch.cuda.reset_peak_memory_stats()
     start = time.perf_counter()
     with torch.inference_mode():
-        out = model.generate(**inputs, max_new_tokens=new_tokens, do_sample=False, use_cache=True)
+        out = model.generate(
+            **inputs,
+            max_new_tokens=new_tokens,
+            do_sample=False,
+            use_cache=True,
+            eos_token_id=None,
+        )
     torch.cuda.synchronize()
     total_s = time.perf_counter() - start
     peak = torch.cuda.max_memory_allocated() / 1024**2
@@ -67,6 +73,45 @@ def _prefill_once(model, inputs):
         model(**inputs, use_cache=True)
     torch.cuda.synchronize()
     return time.perf_counter() - start
+
+
+def _decode_once(model, inputs, new_tokens):
+    from transformers.cache_utils import DynamicCache
+
+    with torch.inference_mode():
+        prefill = model(**inputs, use_cache=True)
+    past_key_values = prefill.past_key_values
+    if isinstance(past_key_values, tuple):
+        past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+    del prefill
+    input_ids = torch.zeros(
+        (inputs["input_ids"].shape[0], 1),
+        device=inputs["input_ids"].device,
+        dtype=inputs["input_ids"].dtype,
+    )
+    full_attention_mask = torch.ones(
+        (
+            inputs["attention_mask"].shape[0],
+            inputs["attention_mask"].shape[1] + new_tokens,
+        ),
+        device=inputs["attention_mask"].device,
+        dtype=inputs["attention_mask"].dtype,
+    )
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    with torch.inference_mode():
+        for step in range(new_tokens):
+            output = model(
+                input_ids=input_ids,
+                attention_mask=full_attention_mask[:, : inputs["attention_mask"].shape[1] + step + 1],
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            past_key_values = output.past_key_values
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - start
+    del output, past_key_values
+    return elapsed, new_tokens / elapsed
 
 
 def _backend():
@@ -87,22 +132,17 @@ def _flash_attn_import_path():
         return f"import_path_unavailable:{exc}"
 
 
-def _decode_tokens_per_s(new_tokens, total_s, prefill_s):
-    decode_s = total_s - prefill_s
-    if decode_s <= 0:
-        return decode_s, None, False
-    return decode_s, new_tokens / decode_s, True
-
-
 def _run_variant(model_id, prompt_len, new_tokens, attn_impl, warmup):
     tok, model = _load_model(model_id, attn_impl)
     inputs = _prompt(tok, prompt_len)
     for _ in range(warmup):
         _generate_once(model, inputs, min(4, new_tokens))
+    _prefill_once(model, inputs)
     prefill_s = _prefill_once(model, inputs)
     out, total_s, peak = _generate_once(model, inputs, new_tokens)
-    decode_s, decode_tps, decode_valid = _decode_tokens_per_s(new_tokens, total_s, prefill_s)
-    decoded = tok.decode(out[0, -min(new_tokens, out.shape[1]) :], skip_special_tokens=True)
+    actual_new_tokens = int(out.shape[1] - inputs["input_ids"].shape[1])
+    decode_s, decode_tps = _decode_once(model, inputs, new_tokens)
+    decoded = tok.decode(out[0, -actual_new_tokens:], skip_special_tokens=True) if actual_new_tokens else ""
     backend = _backend() if attn_impl == "flash_attention_2" else "transformers_sdpa"
     del model, tok, inputs, out
     gc.collect()
@@ -114,9 +154,13 @@ def _run_variant(model_id, prompt_len, new_tokens, attn_impl, warmup):
         "total_s": total_s,
         "time_to_first_token_s": prefill_s,
         "decode_time_s": decode_s,
-        "decode_time_valid": decode_valid,
+        "decode_time_valid": True,
+        "decode_time_method": "direct_cached_forward_loop",
         "decode_tokens_per_s": decode_tps,
-        "total_tokens_per_s": (prompt_len + new_tokens) / max(1e-9, total_s),
+        "requested_new_tokens": new_tokens,
+        "actual_new_tokens": actual_new_tokens,
+        "generation_complete": actual_new_tokens == new_tokens,
+        "total_tokens_per_s": (prompt_len + actual_new_tokens) / max(1e-9, total_s),
         "peak_vram_mb": peak,
         "backend": backend,
         "flash_attn_import_path": _flash_attn_import_path() if attn_impl == "flash_attention_2" else None,
@@ -164,6 +208,11 @@ def run_case(model_id, prompt_len, new_tokens, warmup):
     decode_speedup = None
     if sdpa["decode_tokens_per_s"] is not None and fa2["decode_tokens_per_s"] is not None:
         decode_speedup = fa2["decode_tokens_per_s"] / sdpa["decode_tokens_per_s"]
+    comparable = (
+        sdpa["generation_complete"]
+        and fa2["generation_complete"]
+        and sdpa["actual_new_tokens"] == fa2["actual_new_tokens"]
+    )
     return {
         "name": name,
         "family": "transformers_generation",
@@ -175,8 +224,9 @@ def run_case(model_id, prompt_len, new_tokens, warmup):
         "sdpa": sdpa,
         "flash_attention_2": fa2,
         "backend": fa2["backend"],
-        "speedup_vs_baseline": sdpa["total_s"] / fa2["total_s"],
-        "decode_speedup_vs_baseline": decode_speedup,
+        "comparable": comparable,
+        "speedup_vs_baseline": sdpa["total_s"] / fa2["total_s"] if comparable else None,
+        "decode_speedup_vs_baseline": decode_speedup if comparable else None,
         "peak_vram_native_mb": fa2["peak_vram_mb"],
         "peak_vram_baseline_mb": sdpa["peak_vram_mb"],
         "fallback_attempted": not str(fa2["backend"]).startswith("sm75_native"),
