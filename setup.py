@@ -312,6 +312,27 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
         nvcc_flags.extend(["-Xcompiler", "/Zc:__cplusplus"])
         compiler_c17_flag=["-O2", "/std:c++17", "/Zc:__cplusplus"]
 
+    def sm75_path_sanitizer_flags():
+        """Keep local build paths out of distributable SM75 binaries."""
+        if sys.platform == "win32":
+            return [], []
+
+        prefix_maps = [
+            (str(Path.home()), "/build-home"),
+            (this_dir, "/src/flash-attention"),
+        ]
+        cxx_flags = ["-g0"]
+        for source, replacement in prefix_maps:
+            cxx_flags.extend(
+                [
+                    f"-ffile-prefix-map={source}={replacement}",
+                    f"-fdebug-prefix-map={source}={replacement}",
+                    f"-fmacro-prefix-map={source}={replacement}",
+                ]
+            )
+        nvcc_host_flags = [f"-Xcompiler={flag}" for flag in cxx_flags]
+        return cxx_flags, nvcc_host_flags
+
     ext_modules.append(
         CUDAExtension(
             name="flash_attn_2_cuda",
@@ -428,6 +449,7 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
     if BUILD_SM75_ONLY:
         ext_modules.clear()
     if BUILD_SM75_NATIVE:
+        sm75_cxx_sanitizer_flags, sm75_nvcc_sanitizer_flags = sm75_path_sanitizer_flags()
         sm75_nvcc_flags = [
             "-O3",
             "-std=c++17",
@@ -461,8 +483,8 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
                     "csrc/flash_attn_sm75/src/flash_bwd_generic_sm75.cu",
                 ],
                 extra_compile_args={
-                    "cxx": compiler_c17_flag,
-                    "nvcc": append_nvcc_threads(sm75_nvcc_flags),
+                    "cxx": compiler_c17_flag + sm75_cxx_sanitizer_flags,
+                    "nvcc": append_nvcc_threads(sm75_nvcc_flags + sm75_nvcc_sanitizer_flags),
                 },
                 include_dirs=[
                     Path(this_dir) / "csrc" / "flash_attn_sm75",
