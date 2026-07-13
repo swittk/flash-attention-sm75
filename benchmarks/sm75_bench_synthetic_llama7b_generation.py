@@ -10,7 +10,13 @@ import torch
 
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if REPO_ROOT not in sys.path:
+USE_INSTALLED_FLASH_ATTN = os.getenv("FLASH_ATTN_BENCH_USE_INSTALLED", "0").upper() in {
+    "1",
+    "TRUE",
+    "YES",
+    "ON",
+}
+if not USE_INSTALLED_FLASH_ATTN and REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 
