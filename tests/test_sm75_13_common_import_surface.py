@@ -1,4 +1,4 @@
-def test_common_downstream_imports_resolve():
+def test_common_import_surface():
     from flash_attn import flash_attn_func, flash_attn_varlen_func, flash_attn_with_kvcache
     from flash_attn.bert_padding import pad_input, unpad_input
     from flash_attn.flash_attn_interface import flash_attn_kvpacked_func, flash_attn_qkvpacked_func
