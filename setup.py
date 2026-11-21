@@ -61,7 +61,8 @@ if IS_ROCM:
     ROCM_BACKEND = "triton" if os.getenv("FLASH_ATTENTION_TRITON_AMD_ENABLE", "FALSE") == "TRUE" else "ck"
 NVCC_THREADS = os.getenv("NVCC_THREADS") or "4"
 BUILD_SM75_NATIVE = os.getenv("FLASH_ATTN_DISABLE_SM75_NATIVE", "FALSE") != "TRUE"
-BUILD_SM75_ONLY = os.getenv("FLASH_ATTN_BUILD_SM75_ONLY", "FALSE") == "TRUE"
+# This SM75-focused fork builds only the Turing extension by default.
+BUILD_SM75_ONLY = os.getenv("FLASH_ATTN_BUILD_SM75_ONLY", "TRUE") == "TRUE"
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:

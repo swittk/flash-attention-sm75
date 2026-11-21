@@ -49,12 +49,12 @@ To build and install a wheel:
 
 ```sh
 python3 -m pip install einops
-FLASH_ATTN_BUILD_SM75_ONLY=TRUE python3 -m pip wheel . --no-build-isolation --no-deps -w dist-sm75
+python3 -m pip wheel . --no-build-isolation --no-deps -w dist-sm75
 python3 -m pip install --force-reinstall --no-deps dist-sm75/flash_attn*.whl
 ```
 
-Wheel builds from this repository always compile the checked-out source. This
-fork does not download cached Dao-AILab release wheels.
+Wheel builds from this repository always compile the checked-out source.
+The fork builds SM75-only by default (override with `FLASH_ATTN_BUILD_SM75_ONLY=FALSE` if intentionally building upstream CUDA extensions). It does not download cached Dao-AILab release wheels.
 
 ## Verify The SM75 Backend
 
@@ -90,6 +90,10 @@ FLASH_ATTN_SM75_NATIVE_ONLY=1 FLASH_ATTN_SM75_BAN_FALLBACKS=1 pytest -q tests/te
 
 ## Benchmarks
 
+The historical July 13, 2026 benchmark matrix was measured at commit `3bc7933`.
+It is published under [release evidence](docs/release/sm75-v0.1.0.md); it
+should not be mistaken for a repeat measurement at the current release commit.
+
 On the disclosed RTX 2080 Ti benchmark matrix, the SM75 public attention
 operations achieved a 1.723x geomean against the included PyTorch SDPA-based
 reference pipelines, with a 1.144x minimum. KV-cache update and decode achieved
@@ -108,8 +112,8 @@ so the component benchmark gains should not be read as whole-model gains.
 
 ## Limitations
 
-- CUDA stream and device handling still needs a complete audit and
-  non-default-stream testing.
+- Non-default stream and device semantics have focused tests, but an
+  exhaustive independent audit of every CUDA code path is not claimed.
 - Dropout is disabled because the SM75 code does not implement compatible CUDA
   RNG and Philox state handling.
 - The first release is intended for experimental inference use.
@@ -129,8 +133,9 @@ make sm75-ci
 make sm75-sanitize
 ```
 
-A small release report and its benchmark data will be committed under
-`docs/release/`. Larger raw logs can be attached to the GitHub prerelease.
+The historical benchmark data and version-specific release notes are
+under [docs/release](docs/release/sm75-v0.1.0.md). The GitHub prerelease
+contains the exact binary wheel and its SHA256.
 
 ## Provenance And Licenses
 
